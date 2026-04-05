@@ -9,7 +9,25 @@ import {
   markMessageRead,
   getDailyCount,
 } from '../services/whatsappService.js';
+import { isWhatsappEnabledForOrg } from '../services/whatsappFeatureService.js';
 import env from '../config/env.js';
+
+/**
+ * Shared guard for all WhatsApp tab operations.
+ * Returns 403 with a clear message if feature is locked or expired.
+ */
+async function guardWhatsappAccess(req, res) {
+  const { enabled, reason } = await isWhatsappEnabledForOrg(req.user.organizationId);
+  if (!enabled) {
+    res.status(403).json({
+      success: false,
+      error: reason,
+      code: 'WHATSAPP_FEATURE_LOCKED',
+    });
+    return false;
+  }
+  return true;
+}
 
 // Socket.io instance — set from server.js after startup
 let _io = null;
@@ -169,6 +187,7 @@ export const receiveWebhook = async (req, res) => {
 /** GET /api/v1/whatsapp/conversations */
 export const getConversations = async (req, res) => {
   try {
+    if (!(await guardWhatsappAccess(req, res))) return;
     const { organizationId } = req.user;
     const conversations = await ConversationStatus.find({ organizationId })
       .populate('clientId', 'name email whatsappNumber phoneNumber countryCode')
@@ -185,6 +204,7 @@ export const getConversations = async (req, res) => {
 /** GET /api/v1/whatsapp/conversations/:phone/messages?page=1&limit=50 */
 export const getMessages = async (req, res) => {
   try {
+    if (!(await guardWhatsappAccess(req, res))) return;
     const { phone } = req.params;
     const page  = Math.max(1, parseInt(req.query.page  || '1',  10));
     const limit = Math.min(100, parseInt(req.query.limit || '50', 10));
@@ -205,6 +225,7 @@ export const getMessages = async (req, res) => {
 /** PATCH /api/v1/whatsapp/conversations/:phone/mark-read */
 export const markConversationRead = async (req, res) => {
   try {
+    if (!(await guardWhatsappAccess(req, res))) return;
     const { phone } = req.params;
     await WaMessage.updateMany(
       { phone, isRead: false, direction: 'inbound' },
@@ -228,6 +249,7 @@ export const markConversationRead = async (req, res) => {
 /** POST /api/v1/whatsapp/conversations/:phone/send */
 export const sendToPhone = async (req, res) => {
   try {
+    if (!(await guardWhatsappAccess(req, res))) return;
     const { phone } = req.params;
     const { type = 'text', message, documentUrl, caption, filename, templateName, languageCode, components } = req.body;
 
@@ -332,6 +354,7 @@ export const exchangeAccessToken = async (req, res) => {
 /** GET /api/v1/whatsapp/stats — daily rate-limit status */
 export const getStats = async (req, res) => {
   try {
+    if (!(await guardWhatsappAccess(req, res))) return;
     const daily = getDailyCount();
     return res.json({ success: true, data: daily });
   } catch (error) {

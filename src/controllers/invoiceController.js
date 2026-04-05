@@ -1,3 +1,5 @@
+import bcrypt from 'bcryptjs';
+import { getSuperadminOrgIds } from '../middleware/auth.js';
 import Invoice from '../models/Invoice.js';
 import Organization from '../models/Organization.js';
 import Client from '../models/Client.js';
@@ -9,15 +11,59 @@ import { generateInvoicePdf, generateReceiptPdf } from '../services/pdfService.j
 import { uploadFile } from '../services/storageService.js';
 import { sendEmail } from '../services/emailService.js';
 import { sendDocument, sendMessage } from '../services/whatsappService.js';
+import { isWhatsappEnabledForOrg } from '../services/whatsappFeatureService.js';
+
+/**
+ * Check whether the current user may VIEW invoices.
+ * - superadmin: always yes (it's their org)
+ * - product_owner: NO — product owner cannot view/manage client invoices
+ * - org_admin: only if their org has canViewInvoices = true
+ */
+async function canUserViewInvoices(user) {
+  if (user.role === 'product_owner') return false;
+  if (user.role === 'superadmin') return true;
+  if (user.role === 'org_admin') {
+    const org = await Organization.findById(user.organizationId).select('canViewInvoices');
+    return org?.canViewInvoices === true;
+  }
+  return false;
+}
+
+/**
+ * Returns the organizationId filter for invoice queries, scoped to the user's
+ * allowed org tree. Throws a 403-ready object if not allowed.
+ * { organizationId: { $in: [...] } }
+ */
+async function getInvoiceOrgFilter(user) {
+  const orgIds = await getSuperadminOrgIds(user);
+  if (!orgIds || orgIds.length === 0) {
+    return null;
+  }
+  return { organizationId: { $in: orgIds } };
+}
+
+/**
+ * Check whether the current user may CREATE / EDIT / DELETE invoices.
+ * - product_owner: NO
+ * - superadmin: yes
+ * - org_admin: only if canViewInvoices = true (same flag gates both read and write)
+ */
+async function canUserMutateInvoices(user) {
+  if (user.role === 'product_owner') return false;
+  return canUserViewInvoices(user);
+}
 
 export const create = async (req, res) => {
   try {
-    const { clientId, projectId, items, taxPercentage, notes, paymentAccountIds, organizationId: bodyOrgId } = req.body;
+    if (!(await canUserMutateInvoices(req.user))) {
+      if (req.user.role === 'product_owner') {
+        return res.status(403).json({ success: false, error: 'Product owner cannot create invoices.' });
+      }
+      return res.status(403).json({ success: false, error: 'Invoice access not granted for your organization. Ask your superadmin to enable it.' });
+    }
 
-    // Superadmin can specify org; org_admin uses their own org
-    const organizationId = req.user.role === 'superadmin' && bodyOrgId
-      ? bodyOrgId
-      : req.user.organizationId;
+    const { clientId, projectId, items, taxPercentage, notes, paymentAccountIds } = req.body;
+    const organizationId = req.user.organizationId;
 
     if (!organizationId) {
       return res.status(400).json({ success: false, error: 'organizationId is required.' });
@@ -69,13 +115,16 @@ export const create = async (req, res) => {
           ).catch((e) => console.error('[Invoice] Create email error:', e.message));
         }
         if (client.whatsappNumber) {
-          const phone = client.countryCode
-            ? `${client.countryCode}${client.whatsappNumber}`.replace(/^\+\+/, '+')
-            : client.whatsappNumber;
-          sendMessage(
-            phone,
-            `New Invoice ${invoiceNumber} from ${orgName}\nAmount: ₹${total.toLocaleString('en-IN')}\nPlease check your email for the invoice PDF.\n\n— ${orgName}`
-          ).catch((e) => console.error('[Invoice] Create WA error:', e.message));
+          const { enabled: waCreateEnabled } = await isWhatsappEnabledForOrg(organizationId).catch(() => ({ enabled: false }));
+          if (waCreateEnabled) {
+            const phone = client.countryCode
+              ? `${client.countryCode}${client.whatsappNumber}`.replace(/^\+\+/, '+')
+              : client.whatsappNumber;
+            sendMessage(
+              phone,
+              `New Invoice ${invoiceNumber} from ${orgName}\nAmount: ₹${total.toLocaleString('en-IN')}\nPlease check your email for the invoice PDF.\n\n— ${orgName}`
+            ).catch((e) => console.error('[Invoice] Create WA error:', e.message));
+          }
         }
       }).catch((e) => console.error('[Invoice] Create notify error:', e.message));
     }
@@ -96,10 +145,19 @@ export const create = async (req, res) => {
 
 export const getAll = async (req, res) => {
   try {
-    const { clientId, status, organizationId: queryOrgId, search, page = 1, limit = 15 } = req.query;
-    const filter = req.user.role === 'superadmin'
-      ? (queryOrgId ? { organizationId: queryOrgId } : {})
-      : { organizationId: req.user.organizationId };
+    if (!(await canUserViewInvoices(req.user))) {
+      if (req.user.role === 'product_owner') {
+        return res.status(403).json({ success: false, error: 'Product owner cannot access client invoices.' });
+      }
+      return res.status(403).json({ success: false, error: 'Invoice access not granted for your organization.' });
+    }
+
+    const { clientId, status, search, page = 1, limit = 15 } = req.query;
+    const invoiceOrgIds = await getSuperadminOrgIds(req.user);
+    if (!invoiceOrgIds || invoiceOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const filter = { organizationId: { $in: invoiceOrgIds } };
 
     if (clientId) filter.clientId = clientId;
     if (status) filter.status = status;
@@ -113,6 +171,7 @@ export const getAll = async (req, res) => {
     let query = Invoice.find(filter)
       .populate('clientId', 'name email')
       .populate('projectId', 'name')
+      .populate('organizationId', 'name logo')
       .sort({ createdAt: -1 });
 
     if (!search) {
@@ -153,10 +212,18 @@ export const getAll = async (req, res) => {
 
 export const getById = async (req, res) => {
   try {
-    const filter = req.user.role === 'superadmin'
-      ? { _id: req.params.id }
-      : { _id: req.params.id, organizationId: req.user.organizationId };
-    const invoice = await Invoice.findOne(filter)
+    if (!(await canUserViewInvoices(req.user))) {
+      if (req.user.role === 'product_owner') {
+        return res.status(403).json({ success: false, error: 'Product owner cannot access client invoices.' });
+      }
+      return res.status(403).json({ success: false, error: 'Invoice access not granted for your organization.' });
+    }
+
+    const invoiceByIdOrgIds = await getSuperadminOrgIds(req.user);
+    if (!invoiceByIdOrgIds || invoiceByIdOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, organizationId: { $in: invoiceByIdOrgIds } })
       .populate('clientId', 'name email phoneNumber whatsappNumber address')
       .populate('organizationId', 'name cinNumber taxPercentage address email phone logo')
       .populate('paymentAccountIds', 'accountName type bankName accountNumber ifscCode accountHolderName upiId qrImageUrl isDefault')
@@ -186,6 +253,9 @@ export const getById = async (req, res) => {
 
 export const update = async (req, res) => {
   try {
+    if (!(await canUserMutateInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot modify invoices.' : 'Invoice access not granted for your organization.' });
+    }
     const { items, taxPercentage, notes, status, paymentAccountIds } = req.body;
     const updateData = {};
 
@@ -225,8 +295,12 @@ export const update = async (req, res) => {
     const logEntry = { action: status ? `Status changed to ${status}` : 'Invoice edited', by: req.user._id };
     updateData.$push = { activityLog: logEntry };
 
+    const updateOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!updateOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
     const invoice = await Invoice.findOneAndUpdate(
-      { _id: req.params.id, organizationId: req.user.organizationId },
+      { _id: req.params.id, ...updateOrgFilter },
       updateData,
       { new: true, runValidators: true }
     )
@@ -258,10 +332,14 @@ export const update = async (req, res) => {
 
 export const generatePdf = async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({
-      _id: req.params.id,
-      organizationId: req.user.organizationId,
-    });
+    if (!(await canUserViewInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot access invoices.' : 'Invoice access not granted for your organization.' });
+    }
+    const pdfOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!pdfOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, ...pdfOrgFilter });
 
     if (!invoice) {
       return res.status(404).json({
@@ -321,12 +399,16 @@ export const generatePdf = async (req, res) => {
 
 export const sendInvoice = async (req, res) => {
   try {
+    if (!(await canUserMutateInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot send invoices.' : 'Invoice access not granted for your organization.' });
+    }
     const { ccEmails: requestCcEmails } = req.body || {};
 
-    const invoice = await Invoice.findOne({
-      _id: req.params.id,
-      organizationId: req.user.organizationId,
-    });
+    const sendOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!sendOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, ...sendOrgFilter });
 
     if (!invoice) {
       return res.status(404).json({
@@ -376,8 +458,13 @@ export const sendInvoice = async (req, res) => {
       await invoice.save();
     }
 
-    // Collect CC emails: request body + superadmin emails
-    const superadmins = await User.find({ role: 'superadmin', isActive: true }).select('email');
+    // Collect CC emails: request body + superadmin (org-scoped) + product_owner emails
+    const superadmins = await User.find({
+      $or: [
+        { role: 'product_owner', isActive: true },
+        { role: 'superadmin', organizationId: invoice.organizationId, isActive: true },
+      ],
+    }).select('email');
     const superadminEmails = superadmins.map((sa) => sa.email);
     const allCcEmails = [
       ...(requestCcEmails || []),
@@ -433,16 +520,19 @@ export const sendInvoice = async (req, res) => {
     }
 
     if (client.whatsappNumber) {
-      const whatsappNumber = client.countryCode
-        ? `${client.countryCode}${client.whatsappNumber}`.replace(/^\+\+/, '+')
-        : client.whatsappNumber;
+      const { enabled: waSendEnabled } = await isWhatsappEnabledForOrg(invoice.organizationId).catch(() => ({ enabled: false }));
+      if (waSendEnabled) {
+        const whatsappNumber = client.countryCode
+          ? `${client.countryCode}${client.whatsappNumber}`.replace(/^\+\+/, '+')
+          : client.whatsappNumber;
 
-      results.whatsapp = await sendDocument(
-        whatsappNumber,
-        invoice.pdfUrl,
-        `Invoice ${invoice.invoiceNumber} from ${org.name} - Total: ${invoice.total}`
-      );
-      sentVia.push('whatsapp');
+        results.whatsapp = await sendDocument(
+          whatsappNumber,
+          invoice.pdfUrl,
+          `Invoice ${invoice.invoiceNumber} from ${org.name} - Total: ${invoice.total}`
+        );
+        sentVia.push('whatsapp');
+      }
     }
 
     invoice.status = 'sent';
@@ -467,10 +557,14 @@ export const sendInvoice = async (req, res) => {
 
 export const downloadInvoice = async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({
-      _id: req.params.id,
-      organizationId: req.user.organizationId,
-    });
+    if (!(await canUserViewInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot access invoices.' : 'Invoice access not granted for your organization.' });
+    }
+    const downloadOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!downloadOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, ...downloadOrgFilter });
 
     if (!invoice) {
       return res.status(404).json({ success: false, error: 'Invoice not found.' });
@@ -514,10 +608,14 @@ export const downloadInvoice = async (req, res) => {
 
 export const downloadReceipt = async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({
-      _id: req.params.id,
-      organizationId: req.user.organizationId,
-    });
+    if (!(await canUserViewInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot access invoices.' : 'Invoice access not granted for your organization.' });
+    }
+    const receiptOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!receiptOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, ...receiptOrgFilter });
 
     if (!invoice) {
       return res.status(404).json({ success: false, error: 'Invoice not found.' });
@@ -563,6 +661,9 @@ export const downloadReceipt = async (req, res) => {
 
 export const addPayment = async (req, res) => {
   try {
+    if (!(await canUserMutateInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot record payments.' : 'Invoice access not granted for your organization.' });
+    }
     const { amount, date, method, reference, notes } = req.body;
 
     if (!amount || !date) {
@@ -572,10 +673,11 @@ export const addPayment = async (req, res) => {
       });
     }
 
-    const invoice = await Invoice.findOne({
-      _id: req.params.id,
-      organizationId: req.user.organizationId,
-    });
+    const paymentOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!paymentOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, ...paymentOrgFilter });
 
     if (!invoice) {
       return res.status(404).json({
@@ -623,6 +725,13 @@ export const addPayment = async (req, res) => {
 
     await invoice.save();
 
+    // Auto-provision workspace when invoice is fully paid for the first time
+    if (invoice.paymentStatus === 'paid' && !invoice.workspaceProvisioned) {
+      provisionWorkspace(invoice).catch((e) =>
+        console.error('[Invoice] Workspace provisioning error:', e.message)
+      );
+    }
+
     // Notify client about payment receipt (fire and forget)
     Client.findById(invoice.clientId).then(async (client) => {
       if (!client) return;
@@ -644,13 +753,16 @@ export const addPayment = async (req, res) => {
         ).catch((e) => console.error('[Invoice] Payment email error:', e.message));
       }
       if (client.whatsappNumber) {
-        const phone = client.countryCode
-          ? `${client.countryCode}${client.whatsappNumber}`.replace(/^\+\+/, '+')
-          : client.whatsappNumber;
-        sendMessage(
-          phone,
-          `Payment Received ✓\nInvoice: ${invoice.invoiceNumber}\nAmount Paid: ₹${amount.toLocaleString('en-IN')}${remaining > 0 ? `\nBalance Due: ₹${remaining.toLocaleString('en-IN')}` : '\nFully Paid - Thank you!'}\n\n— ${orgName}`
-        ).catch((e) => console.error('[Invoice] Payment WA error:', e.message));
+        const { enabled: waPayEnabled } = await isWhatsappEnabledForOrg(invoice.organizationId).catch(() => ({ enabled: false }));
+        if (waPayEnabled) {
+          const phone = client.countryCode
+            ? `${client.countryCode}${client.whatsappNumber}`.replace(/^\+\+/, '+')
+            : client.whatsappNumber;
+          sendMessage(
+            phone,
+            `Payment Received ✓\nInvoice: ${invoice.invoiceNumber}\nAmount Paid: ₹${amount.toLocaleString('en-IN')}${remaining > 0 ? `\nBalance Due: ₹${remaining.toLocaleString('en-IN')}` : '\nFully Paid - Thank you!'}\n\n— ${orgName}`
+          ).catch((e) => console.error('[Invoice] Payment WA error:', e.message));
+        }
       }
     }).catch((e) => console.error('[Invoice] Payment notify error:', e.message));
 
@@ -670,10 +782,14 @@ export const addPayment = async (req, res) => {
 
 export const reviseInvoice = async (req, res) => {
   try {
-    const original = await Invoice.findOne({
-      _id: req.params.id,
-      organizationId: req.user.organizationId,
-    });
+    if (!(await canUserMutateInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot revise invoices.' : 'Invoice access not granted for your organization.' });
+    }
+    const reviseOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!reviseOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const original = await Invoice.findOne({ _id: req.params.id, ...reviseOrgFilter });
 
     if (!original) {
       return res.status(404).json({ success: false, error: 'Invoice not found.' });
@@ -754,12 +870,16 @@ export const reviseInvoice = async (req, res) => {
 
 export const updatePayment = async (req, res) => {
   try {
+    if (!(await canUserMutateInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot modify payments.' : 'Invoice access not granted for your organization.' });
+    }
     const { amount, date, method, reference, notes } = req.body;
 
-    const invoice = await Invoice.findOne({
-      _id: req.params.id,
-      organizationId: req.user.organizationId,
-    });
+    const updatePaymentOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!updatePaymentOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, ...updatePaymentOrgFilter });
 
     if (!invoice) {
       return res.status(404).json({ success: false, error: 'Invoice not found.' });
@@ -817,10 +937,14 @@ export const updatePayment = async (req, res) => {
 
 export const removePayment = async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({
-      _id: req.params.id,
-      organizationId: req.user.organizationId,
-    });
+    if (!(await canUserMutateInvoices(req.user))) {
+      return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot remove payments.' : 'Invoice access not granted for your organization.' });
+    }
+    const removePaymentOrgFilter = await getInvoiceOrgFilter(req.user);
+    if (!removePaymentOrgFilter) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, ...removePaymentOrgFilter });
 
     if (!invoice) {
       return res.status(404).json({
@@ -863,3 +987,83 @@ export const removePayment = async (req, res) => {
     });
   }
 };
+
+/**
+ * Auto-provision a workspace when a client's invoice is fully paid.
+ * Creates an Organization + User (org_admin) for the client and sends welcome email.
+ * Runs fire-and-forget — does NOT block the payment response.
+ */
+async function provisionWorkspace(invoice) {
+  const client = await Client.findById(invoice.clientId);
+  if (!client || !client.email) {
+    console.log('[Provision] Skipping: no client or no client email.');
+    return;
+  }
+
+  // Skip if workspace already exists for this client's email
+  const existingUser = await User.findOne({ email: client.email.toLowerCase() });
+  if (existingUser) {
+    // Just mark as provisioned if user already exists
+    await Invoice.findByIdAndUpdate(invoice._id, { workspaceProvisioned: true });
+    console.log('[Provision] User already exists for', client.email);
+    return;
+  }
+
+  // Create organization named after client (or company name)
+  const orgName = client.companyName || client.name;
+  const org = await Organization.create({
+    name: orgName,
+    phone: client.phoneNumber || client.whatsappNumber || null,
+    address: client.address || undefined,
+  });
+
+  // Default password: 123@<email>
+  const defaultPassword = `123@${client.email.toLowerCase()}`;
+  const salt = await bcrypt.genSalt(12);
+  const passwordHash = await bcrypt.hash(defaultPassword, salt);
+
+  const newUser = await User.create({
+    name: client.name,
+    email: client.email.toLowerCase(),
+    passwordHash,
+    role: 'superadmin',
+    organizationId: org._id,
+    isActive: true,
+  });
+
+  // Link user as org admin
+  org.adminIds = [newUser._id];
+  await org.save();
+
+  // Mark invoice as provisioned
+  await Invoice.findByIdAndUpdate(invoice._id, { workspaceProvisioned: true });
+
+  // Send welcome email with credentials
+  const appUrl = process.env.APP_URL || 'https://www.productivo.in';
+  await sendEmail(
+    client.email,
+    'Welcome to Productivo — Your Workspace is Ready!',
+    `
+    <div style="font-family: Inter, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+      <div style="text-align: center; margin-bottom: 32px;">
+        <div style="width: 48px; height: 48px; background: #2563eb; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 16px;">
+          <span style="color: white; font-size: 24px;">⚡</span>
+        </div>
+        <h1 style="color: #111827; font-size: 22px; font-weight: 700; margin: 0;">Your Workspace is Ready!</h1>
+        <p style="color: #6b7280; font-size: 14px; margin-top: 8px;">Your payment has been received. Here are your login credentials.</p>
+      </div>
+      <div style="background: #f3f4f6; border-radius: 16px; padding: 24px; margin-bottom: 24px;">
+        <p style="margin: 0 0 8px 0; color: #374151;"><strong>Organization:</strong> ${orgName}</p>
+        <p style="margin: 0 0 8px 0; color: #374151;"><strong>Login Email:</strong> ${client.email}</p>
+        <p style="margin: 0; color: #374151;"><strong>Default Password:</strong> <code style="background:#e5e7eb; padding: 2px 6px; border-radius:4px;">${defaultPassword}</code></p>
+      </div>
+      <p style="color: #6b7280; font-size: 13px; text-align: center;">Please change your password after logging in for the first time.</p>
+      <div style="text-align: center; margin-top: 24px;">
+        <a href="${appUrl}" style="background: #2563eb; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">Login to Productivo</a>
+      </div>
+    </div>
+    `
+  );
+
+  console.log(`[Provision] Workspace created for ${client.email} (org: ${orgName})`);
+}

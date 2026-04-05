@@ -7,8 +7,57 @@ import Meeting from '../models/Meeting.js';
 import Task from '../models/Task.js';
 import Project from '../models/Project.js';
 import Client from '../models/Client.js';
+import Enquiry from '../models/Enquiry.js';
+import Purchase from '../models/Purchase.js';
+import Subscription from '../models/Subscription.js';
+import Category from '../models/Category.js';
+import WhatsappFeature from '../models/WhatsappFeature.js';
 import { getDailyCount } from '../services/whatsappService.js';
 import { getLocationUsage } from '../routes/location.js';
+
+/**
+ * GET /api/v1/superadmin/users?search=&page=1&limit=20
+ * Lists all superadmin accounts (paid clients) platform-wide.
+ * product_owner only.
+ */
+export const getUsers = async (req, res) => {
+  try {
+    const { search, page = 1, limit = 20 } = req.query;
+    const filter = { role: 'superadmin' };
+
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const total = await User.countDocuments(filter);
+    const users = await User.find(filter)
+      .select('-passwordHash -mpinHash')
+      .populate('organizationId', 'name logo')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        users,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(total / parseInt(limit)),
+        },
+      },
+    });
+  } catch (error) {
+    console.error('SuperAdmin getUsers error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch users.' });
+  }
+};
 
 /**
  * GET /api/v1/superadmin/overview
@@ -27,6 +76,7 @@ export const getOverview = async (req, res) => {
     const [
       totalUsers, totalOrgs, totalInvoices, totalMeetings,
       totalTasks, totalProjects, totalClients, totalActivityLogs,
+      totalEnquiries, newEnquiries, premiumEnquiries,
     ] = await Promise.all([
       User.countDocuments(),
       Organization.countDocuments(),
@@ -36,6 +86,9 @@ export const getOverview = async (req, res) => {
       Project.countDocuments(),
       Client.countDocuments(),
       ActivityLog.countDocuments(),
+      Enquiry.countDocuments(),
+      Enquiry.countDocuments({ status: 'new' }),
+      Enquiry.countDocuments({ source: 'premium_feature' }),
     ]);
 
     // ── MongoDB native DB + collection stats ─────────────────────────────────
@@ -116,29 +169,72 @@ export const getOverview = async (req, res) => {
       { $limit: 10 },
     ]);
 
-    // ── Per-org breakdown ─────────────────────────────────────────────────────
-    const orgs = await Organization.find().select('name').lean();
-    const orgStats = await Promise.all(
-      orgs.map(async (org) => {
-        const [users, meetings, invoices, tasks] = await Promise.all([
-          User.countDocuments({ organizationId: org._id }),
-          Meeting.countDocuments({ organizationId: org._id }),
-          Invoice.countDocuments({ organizationId: org._id }),
-          Task.countDocuments({ organizationId: org._id }),
+    // ── Recent enquiries (all sources) ──────────────────────────────────────
+    const recentEnquiries = await Enquiry.find()
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    // ── Per-superadmin breakdown (paid clients) ───────────────────────────────
+    // Group all orgs by their owning superadmin
+    const orgs = await Organization.find()
+      .select('name superadminId parentOrgId')
+      .populate('superadminId', 'name email')
+      .lean();
+
+    // Build map: superadminId → list of orgIds
+    const saOrgMap = {}; // key: superadminId string
+    for (const org of orgs) {
+      const key = org.superadminId?._id?.toString() || 'unassigned';
+      if (!saOrgMap[key]) {
+        saOrgMap[key] = {
+          superadmin: org.superadminId
+            ? { id: org.superadminId._id, name: org.superadminId.name, email: org.superadminId.email }
+            : null,
+          orgIds: [],
+          orgs: [],
+        };
+      }
+      saOrgMap[key].orgIds.push(org._id);
+      saOrgMap[key].orgs.push({ orgId: org._id, name: org.name, isMaster: !org.parentOrgId });
+    }
+
+    // For each superadmin group: fetch DB counts + API activity across all their orgIds
+    const superadminBreakdown = await Promise.all(
+      Object.values(saOrgMap).map(async (group) => {
+        const orgIds = group.orgIds;
+
+        // DB record counts across all orgs of this superadmin
+        const [users, meetings, invoices, tasks, projects, clients] = await Promise.all([
+          User.countDocuments({ organizationId: { $in: orgIds } }),
+          Meeting.countDocuments({ organizationId: { $in: orgIds } }),
+          Invoice.countDocuments({ organizationId: { $in: orgIds } }),
+          Task.countDocuments({ organizationId: { $in: orgIds } }),
+          Project.countDocuments({ organizationId: { $in: orgIds } }),
+          Client.countDocuments({ organizationId: { $in: orgIds } }),
         ]);
-        const emailsSent = await ActivityLog.countDocuments({
-          type: 'email',
-          success: true,
-          organizationId: org._id,
-          createdAt: { $gte: startOfMonth },
-        });
-        const waSent = await ActivityLog.countDocuments({
-          type: 'whatsapp',
-          success: true,
-          organizationId: org._id,
-          createdAt: { $gte: startOfMonth },
-        });
-        return { orgId: org._id, name: org.name, users, meetings, invoices, tasks, emailsSent, waSent };
+
+        // API activity: today + this month + this month errors
+        const [apiToday, apiThisMonth, apiErrors] = await Promise.all([
+          ActivityLog.countDocuments({ type: 'api', organizationId: { $in: orgIds }, createdAt: { $gte: startOfDay } }),
+          ActivityLog.countDocuments({ type: 'api', organizationId: { $in: orgIds }, createdAt: { $gte: startOfMonth } }),
+          ActivityLog.countDocuments({ type: 'api', success: false, organizationId: { $in: orgIds }, createdAt: { $gte: startOfMonth } }),
+        ]);
+
+        // Email + WhatsApp usage this month
+        const [emailsThisMonth, waThisMonth] = await Promise.all([
+          ActivityLog.countDocuments({ type: 'email', success: true, organizationId: { $in: orgIds }, createdAt: { $gte: startOfMonth } }),
+          ActivityLog.countDocuments({ type: 'whatsapp', success: true, organizationId: { $in: orgIds }, createdAt: { $gte: startOfMonth } }),
+        ]);
+
+        return {
+          superadmin: group.superadmin,
+          orgs: group.orgs,
+          db: { users, meetings, invoices, tasks, projects, clients },
+          api: { today: apiToday, thisMonth: apiThisMonth, errorsThisMonth: apiErrors },
+          email: { thisMonth: emailsThisMonth },
+          whatsapp: { thisMonth: waThisMonth },
+        };
       })
     );
 
@@ -154,6 +250,7 @@ export const getOverview = async (req, res) => {
           projects: totalProjects,
           clients: totalClients,
           activityLogs: totalActivityLogs,
+          enquiries: totalEnquiries,
           // MongoDB native stats
           native: {
             totalCollections: dbStats.collections,
@@ -193,13 +290,98 @@ export const getOverview = async (req, res) => {
             avgMs: Math.round(e.avgMs || 0),
           })),
         },
-        orgStats,
+        superadminBreakdown,
+        enquiries: {
+          total: totalEnquiries,
+          new: newEnquiries,
+          premium: premiumEnquiries,
+          recent: recentEnquiries,
+        },
         location: getLocationUsage(),
       },
     });
   } catch (error) {
     console.error('SuperAdmin overview error:', error);
     return res.status(500).json({ success: false, error: 'Failed to fetch overview.' });
+  }
+};
+
+/**
+ * PATCH /api/v1/superadmin/accounts/:id/block
+ * Toggle block/unblock a superadmin account.
+ * Blocking sets isActive=false on the superadmin AND all users in their org tree.
+ * Unblocking restores isActive=true for all of them.
+ * product_owner only.
+ */
+export const blockSuperadmin = async (req, res) => {
+  try {
+    const target = await User.findById(req.params.id);
+    if (!target) return res.status(404).json({ success: false, error: 'User not found.' });
+    if (target.role !== 'superadmin') return res.status(400).json({ success: false, error: 'Target must be a superadmin account.' });
+
+    const newActive = !target.isActive;
+
+    // Find all orgs owned by this superadmin
+    const orgs = await Organization.find({ superadminId: target._id }).select('_id').lean();
+    const orgIds = orgs.map((o) => o._id);
+
+    // Toggle superadmin + all members across their org tree
+    await User.updateMany(
+      { $or: [{ _id: target._id }, { organizationId: { $in: orgIds } }] },
+      { isActive: newActive }
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: { isActive: newActive },
+      message: newActive ? 'Account unblocked.' : 'Account blocked. All users in this org tree cannot log in.',
+    });
+  } catch (error) {
+    console.error('blockSuperadmin error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to update account status.' });
+  }
+};
+
+/**
+ * DELETE /api/v1/superadmin/accounts/:id
+ * Permanently delete a superadmin and ALL data belonging to their org tree.
+ * Deletes: Users, Organizations, Clients, Projects, Tasks, Invoices, Meetings,
+ *          ActivityLogs, Categories, Subscription, WhatsappFeature, Purchase records.
+ * product_owner only. Cannot delete product_owner accounts.
+ */
+export const deleteSuperadminAccount = async (req, res) => {
+  try {
+    const target = await User.findById(req.params.id);
+    if (!target) return res.status(404).json({ success: false, error: 'User not found.' });
+    if (target.role !== 'superadmin') return res.status(400).json({ success: false, error: 'Target must be a superadmin account.' });
+
+    // Find all orgs owned by this superadmin
+    const orgs = await Organization.find({ superadminId: target._id }).select('_id').lean();
+    const orgIds = orgs.map((o) => o._id);
+
+    // Delete all org-scoped data in parallel
+    await Promise.all([
+      User.deleteMany({ $or: [{ _id: target._id }, { organizationId: { $in: orgIds } }] }),
+      Organization.deleteMany({ superadminId: target._id }),
+      Client.deleteMany({ organizationId: { $in: orgIds } }),
+      Project.deleteMany({ organizationId: { $in: orgIds } }),
+      Task.deleteMany({ organizationId: { $in: orgIds } }),
+      Invoice.deleteMany({ organizationId: { $in: orgIds } }),
+      Meeting.deleteMany({ organizationId: { $in: orgIds } }),
+      ActivityLog.deleteMany({ organizationId: { $in: orgIds } }),
+      Category.deleteMany({ organizationId: { $in: orgIds } }),
+      Subscription.deleteMany({ userId: target._id }),
+      WhatsappFeature.deleteMany({ superadminId: target._id }),
+      Purchase.deleteMany({ userId: target._id }),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Superadmin account and all associated data permanently deleted.',
+    });
+  } catch (error) {
+    console.error('deleteSuperadminAccount error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to delete account.' });
   }
 };
 
@@ -238,5 +420,52 @@ export const getLogs = async (req, res) => {
   } catch (error) {
     console.error('SuperAdmin logs error:', error);
     return res.status(500).json({ success: false, error: 'Failed to fetch logs.' });
+  }
+};
+
+/**
+ * GET /api/v1/superadmin/payments?status=paid|pending|failed&page=1&limit=20
+ * Returns Purchase records (payments from landing page). Product owner only.
+ */
+export const getPayments = async (req, res) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    const filter = {};
+    if (status) filter.status = status;
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const [purchases, total] = await Promise.all([
+      Purchase.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)).lean(),
+      Purchase.countDocuments(filter),
+    ]);
+
+    const [totalRevenue, paidCount, pendingCount, failedCount] = await Promise.all([
+      Purchase.aggregate([{ $match: { status: 'paid' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+      Purchase.countDocuments({ status: 'paid' }),
+      Purchase.countDocuments({ status: 'pending' }),
+      Purchase.countDocuments({ status: 'failed' }),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        purchases,
+        summary: {
+          totalRevenue: totalRevenue[0]?.total || 0,
+          paid: paidCount,
+          pending: pendingCount,
+          failed: failedCount,
+        },
+        pagination: {
+          total,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit)),
+          limit: parseInt(limit),
+        },
+      },
+    });
+  } catch (error) {
+    console.error('SuperAdmin payments error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch payment records.' });
   }
 };

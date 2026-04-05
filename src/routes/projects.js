@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { body } from 'express-validator';
 import validate from '../middleware/validate.js';
 import { authenticate, requireOrgAdmin } from '../middleware/auth.js';
+import { checkLimit } from '../middleware/planLimits.js';
 import {
   create, getAll, getById, update, remove, getStats,
   addMember, removeMember, updateMember,
@@ -16,6 +17,7 @@ router.get('/:id', getById);
 router.get('/:id/stats', getStats);
 
 router.post('/',
+  checkLimit('projects'),
   validate([
     body('name').notEmpty().withMessage('Project name is required').trim(),
     body('status').optional().isIn(['planning', 'active', 'on_hold', 'completed', 'cancelled']),

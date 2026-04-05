@@ -3,15 +3,21 @@ import Client from '../models/Client.js';
 import Task from '../models/Task.js';
 import Project from '../models/Project.js';
 import Meeting from '../models/Meeting.js';
+import { getSuperadminOrgIds } from '../middleware/auth.js';
 
 export const getStats = async (req, res) => {
   try {
-    const { organizationId: queryOrgId } = req.query;
-    const orgId = req.user.role === 'superadmin' && queryOrgId
-      ? queryOrgId
-      : req.user.organizationId;
+    // product_owner has no org data — dashboard is for org members only
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner does not have an org dashboard.' });
+    }
 
-    const orgFilter = orgId ? { organizationId: orgId } : {};
+    const orgIds = await getSuperadminOrgIds(req.user);
+    if (!orgIds || orgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+
+    const orgFilter = { organizationId: { $in: orgIds } };
 
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { body } from 'express-validator';
 import validate from '../middleware/validate.js';
 import { authenticate, requireOrg, requireOrgAdmin } from '../middleware/auth.js';
+import { checkLimit } from '../middleware/planLimits.js';
 import {
   create,
   getAll,
@@ -11,6 +12,7 @@ import {
   getMembers,
   addMember,
   removeMember,
+  updateInvoicePermission,
 } from '../controllers/organizationController.js';
 
 const router = Router();
@@ -22,6 +24,9 @@ router.get('/', getAll);
 
 router.post(
   '/',
+  // Only enforce sub-org limit when creating a child org (parentOrgId present).
+  // Master org creation is always allowed — free users need to create their first org.
+  (req, res, next) => req.body.parentOrgId ? checkLimit('subOrgs')(req, res, next) : next(),
   validate([
     body('name').notEmpty().withMessage('Organization name is required').trim(),
   ]),
@@ -36,6 +41,7 @@ router.get('/:id/members', requireOrg, getMembers);
 router.post(
   '/:id/members',
   requireOrgAdmin,
+  checkLimit('users'),
   validate([
     body('email').notEmpty().withMessage('Email is required').isEmail(),
     body('name').optional().trim(),
@@ -46,5 +52,8 @@ router.post(
 );
 
 router.delete('/:id/members/:userId', requireOrgAdmin, removeMember);
+
+// Invoice view permission — only superadmin (owner) or product_owner
+router.patch('/:id/invoice-permission', requireOrgAdmin, updateInvoicePermission);
 
 export default router;

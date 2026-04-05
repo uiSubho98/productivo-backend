@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { body } from 'express-validator';
 import validate from '../middleware/validate.js';
 import { authenticate, requireOrgAdmin } from '../middleware/auth.js';
+import { checkLimit } from '../middleware/planLimits.js';
 import {
   create,
   getAll,
@@ -23,6 +24,7 @@ router.use(authenticate, requireOrgAdmin);
 
 router.post(
   '/',
+  checkLimit('invoices'),
   validate([
     body('clientId')
       .notEmpty()

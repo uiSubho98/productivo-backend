@@ -27,6 +27,9 @@ import imageProxyRoutes from './routes/imageProxy.js';
 import whatsappRoutes from './routes/whatsapp.js';
 import locationRoutes from './routes/location.js';
 import enquiryRoutes from './routes/enquiries.js';
+import paymentRoutes from './routes/payments.js';
+import subscriptionRoutes from './routes/subscription.js';
+import featureFlagRoutes from './routes/featureFlags.js';
 import { setSocketIo } from './controllers/whatsappController.js';
 
 const app = express();
@@ -64,12 +67,7 @@ app.use(helmet({
   contentSecurityPolicy: false, // allow inline styles in landing page
 }));
 app.use(cors({
-  origin: [
-    'https://crm.productivo.in',
-    'https://www.productivo.in',
-    'http://localhost:5173',
-    'http://localhost:3000',
-  ],
+  origin: true,
   credentials: true,
 }));
 app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'));
@@ -104,6 +102,9 @@ app.use('/api/v1/whatsapp', whatsappRoutes);
 app.use('/api/v1/superadmin', superAdminRoutes);
 app.use('/api/v1/location', locationRoutes);
 app.use('/api/v1/enquiries', enquiryRoutes);
+app.use('/api/v1/payments', paymentRoutes);
+app.use('/api/v1/subscription', subscriptionRoutes);
+app.use('/api/v1/feature-flags', featureFlagRoutes);
 
 // 404 handler
 app.use((req, res) => {

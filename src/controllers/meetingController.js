@@ -3,6 +3,8 @@ import Organization from '../models/Organization.js';
 import Client from '../models/Client.js';
 import User from '../models/User.js';
 import Project from '../models/Project.js';
+import { getSuperadminOrgIds } from '../middleware/auth.js';
+import { isWhatsappEnabledForOrg } from '../services/whatsappFeatureService.js';
 import { createEvent } from '../services/calendarService.js';
 import { generateMeetingNotesPdf } from '../services/pdfService.js';
 import { uploadFile } from '../services/storageService.js';
@@ -12,9 +14,13 @@ import { sendMessage } from '../services/whatsappService.js';
 /**
  * Send meeting notifications (email + whatsapp) to all attendees.
  * Runs async — does not block the response.
+ * @param {string|ObjectId} organizationId - used to gate WhatsApp sends
  */
-async function notifyAttendees(attendees, title, dateStr, duration, meetLink, orgName) {
+async function notifyAttendees(attendees, title, dateStr, duration, meetLink, orgName, organizationId) {
   const results = { emailsSent: 0, whatsappSent: 0, errors: [] };
+
+  // Check WA feature flag once for all attendees (same org)
+  const { enabled: waNotifyEnabled } = await isWhatsappEnabledForOrg(organizationId).catch(() => ({ enabled: false }));
 
   for (const attendee of attendees) {
     // Email
@@ -39,8 +45,8 @@ async function notifyAttendees(attendees, title, dateStr, duration, meetLink, or
       }
     }
 
-    // WhatsApp
-    if (attendee.whatsapp) {
+    // WhatsApp — only if feature is enabled for this org
+    if (attendee.whatsapp && waNotifyEnabled) {
       try {
         await sendMessage(
           attendee.whatsapp,
@@ -55,7 +61,7 @@ async function notifyAttendees(attendees, title, dateStr, duration, meetLink, or
     }
   }
 
-  console.log(`[Meeting] Notifications: ${results.emailsSent} emails, ${results.whatsappSent} whatsapp sent`);
+  console.log(`[Meeting] Notifications: ${results.emailsSent} emails, ${results.whatsappSent} whatsapp sent${!waNotifyEnabled ? ' (WhatsApp disabled for this org)' : ''}`);
   return results;
 }
 
@@ -174,7 +180,7 @@ export const create = async (req, res) => {
     });
 
     // Fire notifications async — don't block response
-    notifyAttendees(finalAttendees, title, dateStr, duration || 60, meetLink, orgName)
+    notifyAttendees(finalAttendees, title, dateStr, duration || 60, meetLink, orgName, req.user.organizationId)
       .then((results) => {
         console.log(`[Meeting] All notifications done for "${title}"`);
       })
@@ -198,8 +204,15 @@ export const create = async (req, res) => {
 
 export const getAll = async (req, res) => {
   try {
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access meeting data.' });
+    }
+    const meetingOrgIds = await getSuperadminOrgIds(req.user);
+    if (!meetingOrgIds || meetingOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
     const { status, projectId, clientId, meetingType } = req.query;
-    const filter = { organizationId: req.user.organizationId };
+    const filter = { organizationId: { $in: meetingOrgIds } };
 
     if (status) filter.status = status;
     if (projectId) filter.projectId = projectId;
@@ -220,9 +233,16 @@ export const getAll = async (req, res) => {
 
 export const getById = async (req, res) => {
   try {
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access meeting data.' });
+    }
+    const meetingByIdOrgIds = await getSuperadminOrgIds(req.user);
+    if (!meetingByIdOrgIds || meetingByIdOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
     const meeting = await Meeting.findOne({
       _id: req.params.id,
-      organizationId: req.user.organizationId,
+      organizationId: { $in: meetingByIdOrgIds },
     })
       .populate('projectId', 'name')
       .populate('clientId', 'name email whatsappNumber phoneNumber');
@@ -379,7 +399,8 @@ export const sendNotes = async (req, res) => {
       '',
       0,
       meeting.notesPdfUrl,
-      org?.name || 'Team'
+      org?.name || 'Team',
+      meeting.organizationId
     );
 
     return res.status(200).json({ success: true, data: results, message: 'Notes sent.' });

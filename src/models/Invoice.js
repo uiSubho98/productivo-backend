@@ -165,6 +165,10 @@ const invoiceSchema = new mongoose.Schema(
       ref: 'Invoice',
       default: null,
     },
+    workspaceProvisioned: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,

@@ -7,7 +7,7 @@ export const create = async (req, res) => {
       accountHolderName, upiId, qrImageUrl, isDefault, organizationId,
     } = req.body;
 
-    const orgId = req.user.role === 'superadmin' && organizationId
+    const orgId = req.user.role === 'product_owner' && organizationId
       ? organizationId
       : req.user.organizationId;
 
@@ -55,7 +55,7 @@ export const create = async (req, res) => {
 
 export const getAll = async (req, res) => {
   try {
-    const orgId = req.user.role === 'superadmin' && req.query.organizationId
+    const orgId = req.user.role === 'product_owner' && req.query.organizationId
       ? req.query.organizationId
       : req.user.organizationId;
 
@@ -79,7 +79,7 @@ export const getAll = async (req, res) => {
 
 export const getById = async (req, res) => {
   try {
-    const orgId = req.user.role === 'superadmin' ? undefined : req.user.organizationId;
+    const orgId = req.user.role === 'product_owner' ? undefined : req.user.organizationId;
     const filter = { _id: req.params.id, isActive: true };
     if (orgId) filter.organizationId = orgId;
 
@@ -122,7 +122,7 @@ export const update = async (req, res) => {
     if (upiId !== undefined) updateData.upiId = upiId;
     if (qrImageUrl !== undefined) updateData.qrImageUrl = qrImageUrl;
 
-    const orgId = req.user.role === 'superadmin' ? undefined : req.user.organizationId;
+    const orgId = req.user.role === 'product_owner' ? undefined : req.user.organizationId;
     const filter = { _id: req.params.id, isActive: true };
     if (orgId) filter.organizationId = orgId;
 
@@ -155,7 +155,7 @@ export const update = async (req, res) => {
 
 export const remove = async (req, res) => {
   try {
-    const orgId = req.user.role === 'superadmin' ? undefined : req.user.organizationId;
+    const orgId = req.user.role === 'product_owner' ? undefined : req.user.organizationId;
     const filter = { _id: req.params.id, isActive: true };
     if (orgId) filter.organizationId = orgId;
 
@@ -187,7 +187,7 @@ export const remove = async (req, res) => {
 
 export const setDefault = async (req, res) => {
   try {
-    const orgId = req.user.role === 'superadmin' ? undefined : req.user.organizationId;
+    const orgId = req.user.role === 'product_owner' ? undefined : req.user.organizationId;
     const filter = { _id: req.params.id, isActive: true };
     if (orgId) filter.organizationId = orgId;
 

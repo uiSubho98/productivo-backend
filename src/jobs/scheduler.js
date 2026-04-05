@@ -4,6 +4,7 @@ import Meeting from '../models/Meeting.js';
 import User from '../models/User.js';
 import { sendEmail } from '../services/emailService.js';
 import { sendMessage } from '../services/whatsappService.js';
+import { isWhatsappEnabledForOrg } from '../services/whatsappFeatureService.js';
 import { refreshAccessToken, checkTokenHealth } from '../config/googleAuth.js';
 
 /**
@@ -55,11 +56,14 @@ const checkFiveMinuteMeetingReminders = () => {
         `;
         const waText = `⏰ Meeting in 5 min: ${meeting.title}\nAt: ${timeStr}${meeting.meetLink ? `\nJoin: ${meeting.meetLink}` : ''}`;
 
+        // Check WA feature flag once per meeting (same org for all attendees)
+        const { enabled: waEnabled5 } = await isWhatsappEnabledForOrg(meeting.organizationId).catch(() => ({ enabled: false }));
+
         for (const attendee of meeting.attendees) {
           if (attendee.email) {
             await sendEmail(attendee.email, subject, html).catch(() => {});
           }
-          if (attendee.whatsapp) {
+          if (attendee.whatsapp && waEnabled5) {
             await sendMessage(attendee.whatsapp, waText).catch(() => {});
           }
         }
@@ -105,9 +109,10 @@ const checkMeetingReminders = () => {
         `;
         const waText = `📅 Meeting in 1 hour: ${meeting.title}\nAt: ${dateStr}${meeting.meetLink ? `\nJoin: ${meeting.meetLink}` : ''}`;
 
+        const { enabled: waEnabled1h } = await isWhatsappEnabledForOrg(meeting.organizationId).catch(() => ({ enabled: false }));
         for (const attendee of meeting.attendees) {
           if (attendee.email) await sendEmail(attendee.email, subject, html).catch(() => {});
-          if (attendee.whatsapp) await sendMessage(attendee.whatsapp, waText).catch(() => {});
+          if (attendee.whatsapp && waEnabled1h) await sendMessage(attendee.whatsapp, waText).catch(() => {});
         }
       }
 
@@ -149,9 +154,10 @@ const checkTaskDueTomorrow = () => {
         `;
         const waText = `📋 Task due tomorrow: ${task.title}\nDue: ${dueDateStr}\nPlease complete it on time.`;
 
+        const { enabled: waEnabledTomorrow } = await isWhatsappEnabledForOrg(task.organizationId).catch(() => ({ enabled: false }));
         for (const assignee of (task.assignees || [])) {
           if (assignee.email) await sendEmail(assignee.email, subject, html).catch(() => {});
-          if (assignee.whatsapp) await sendMessage(assignee.whatsapp, waText).catch(() => {});
+          if (assignee.whatsapp && waEnabledTomorrow) await sendMessage(assignee.whatsapp, waText).catch(() => {});
         }
       }
 
@@ -192,9 +198,10 @@ const checkOverdueReminders = () => {
         `;
         const waText = `⚠️ Overdue task: ${task.title}\nWas due: ${dueDateStr}\nPlease complete or update the deadline.`;
 
+        const { enabled: waEnabledOverdue } = await isWhatsappEnabledForOrg(task.organizationId).catch(() => ({ enabled: false }));
         for (const assignee of (task.assignees || [])) {
           if (assignee.email) await sendEmail(assignee.email, subject, html).catch(() => {});
-          if (assignee.whatsapp) await sendMessage(assignee.whatsapp, waText).catch(() => {});
+          if (assignee.whatsapp && waEnabledOverdue) await sendMessage(assignee.whatsapp, waText).catch(() => {});
         }
       }
 

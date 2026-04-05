@@ -1,4 +1,5 @@
 import Client from '../models/Client.js';
+import { getSuperadminOrgIds } from '../middleware/auth.js';
 
 export const create = async (req, res) => {
   try {
@@ -9,10 +10,11 @@ export const create = async (req, res) => {
       organizationId: bodyOrgId,
     } = req.body;
 
-    // Superadmin can specify org; org_admin uses their own org
-    const organizationId = req.user.role === 'superadmin' && bodyOrgId
-      ? bodyOrgId
-      : req.user.organizationId;
+    // product_owner cannot create clients — they have no org scope
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot create clients.' });
+    }
+    const organizationId = req.user.organizationId;
 
     if (!organizationId) {
       return res.status(400).json({ success: false, error: 'organizationId is required.' });
@@ -60,11 +62,17 @@ export const create = async (req, res) => {
 
 export const getAll = async (req, res) => {
   try {
-    const { organizationId: queryOrgId } = req.query;
-    const filter = req.user.role === 'superadmin'
-      ? (queryOrgId ? { organizationId: queryOrgId } : {})
-      : { organizationId: req.user.organizationId };
-    const clients = await Client.find(filter).sort({ createdAt: -1 });
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access client data.' });
+    }
+    const orgIds = await getSuperadminOrgIds(req.user);
+    if (!orgIds || orgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const filter = { organizationId: { $in: orgIds } };
+    const clients = await Client.find(filter)
+      .populate('organizationId', 'name logo')
+      .sort({ createdAt: -1 });
 
     return res.status(200).json({
       success: true,
@@ -81,10 +89,14 @@ export const getAll = async (req, res) => {
 
 export const getById = async (req, res) => {
   try {
-    const filter = req.user.role === 'superadmin'
-      ? { _id: req.params.id }
-      : { _id: req.params.id, organizationId: req.user.organizationId };
-    const client = await Client.findOne(filter).populate('notes.createdBy', 'name email');
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access client data.' });
+    }
+    const orgIds = await getSuperadminOrgIds(req.user);
+    if (!orgIds || orgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const client = await Client.findOne({ _id: req.params.id, organizationId: { $in: orgIds } }).populate('notes.createdBy', 'name email');
 
     if (!client) {
       return res.status(404).json({
@@ -167,10 +179,14 @@ export const update = async (req, res) => {
 
 export const remove = async (req, res) => {
   try {
-    const filter = { _id: req.params.id };
-    if (req.user.role !== 'superadmin') filter.organizationId = req.user.organizationId;
-
-    const client = await Client.findOneAndDelete(filter);
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot delete clients.' });
+    }
+    const orgIds = await getSuperadminOrgIds(req.user);
+    if (!orgIds || orgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const client = await Client.findOneAndDelete({ _id: req.params.id, organizationId: { $in: orgIds } });
 
     if (!client) {
       return res.status(404).json({
@@ -203,12 +219,16 @@ export const updatePipelineStage = async (req, res) => {
       });
     }
 
-    const filter = req.user.role === 'superadmin'
-      ? { _id: req.params.id }
-      : { _id: req.params.id, organizationId: req.user.organizationId };
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot update clients.' });
+    }
+    const pipelineOrgIds = await getSuperadminOrgIds(req.user);
+    if (!pipelineOrgIds || pipelineOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
 
     const client = await Client.findOneAndUpdate(
-      filter,
+      { _id: req.params.id, organizationId: { $in: pipelineOrgIds } },
       { pipelineStage },
       { new: true, runValidators: true }
     );
@@ -246,9 +266,14 @@ export const addNote = async (req, res) => {
       });
     }
 
-    const noteFilter = req.user.role === 'superadmin'
-      ? { _id: req.params.id }
-      : { _id: req.params.id, organizationId: req.user.organizationId };
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot add notes to clients.' });
+    }
+    const noteOrgIds = await getSuperadminOrgIds(req.user);
+    if (!noteOrgIds || noteOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const noteFilter = { _id: req.params.id, organizationId: { $in: noteOrgIds } };
 
     const client = await Client.findOneAndUpdate(
       noteFilter,
@@ -287,11 +312,17 @@ export const addNote = async (req, res) => {
 
 export const getByPipeline = async (req, res) => {
   try {
-    const { organizationId: queryOrgId } = req.query;
-    const filter = req.user.role === 'superadmin'
-      ? (queryOrgId ? { organizationId: queryOrgId } : {})
-      : { organizationId: req.user.organizationId };
-    const clients = await Client.find(filter).sort({ createdAt: -1 });
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access client data.' });
+    }
+    const pipelineAllOrgIds = await getSuperadminOrgIds(req.user);
+    if (!pipelineAllOrgIds || pipelineAllOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const filter = { organizationId: { $in: pipelineAllOrgIds } };
+    const clients = await Client.find(filter)
+      .populate('organizationId', 'name logo')
+      .sort({ createdAt: -1 });
 
     const stages = ['lead', 'contacted', 'quotation_sent', 'quotation_revised', 'mvp_shared', 'converted', 'lost'];
     const grouped = {};

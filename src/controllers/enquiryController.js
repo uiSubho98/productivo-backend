@@ -15,6 +15,31 @@ export const createEnquiry = async (req, res) => {
   }
 };
 
+// POST /api/v1/enquiries/premium — authenticated, superadmin/org_admin only
+// Submitted from inside the app when user wants to unlock WhatsApp premium features
+export const createPremiumEnquiry = async (req, res) => {
+  try {
+    const { fullName, email, phone, description, featureInterest, orgName } = req.body;
+    if (!fullName || !email || !phone || !description) {
+      return res.status(400).json({ success: false, error: 'All fields are required.' });
+    }
+    const enquiry = await Enquiry.create({
+      fullName,
+      email,
+      phone,
+      description,
+      source: 'premium_feature',
+      featureInterest: Array.isArray(featureInterest) ? featureInterest : [],
+      organizationId: req.user?.organizationId || null,
+      orgName: orgName || '',
+    });
+    return res.status(201).json({ success: true, data: enquiry });
+  } catch (err) {
+    console.error('createPremiumEnquiry error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to save enquiry.' });
+  }
+};
+
 // GET /api/v1/enquiries — protected, superadmin + org_admin only
 export const getEnquiries = async (req, res) => {
   try {

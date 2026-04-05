@@ -2,6 +2,7 @@ import Project from '../models/Project.js';
 import Task from '../models/Task.js';
 import Client from '../models/Client.js';
 import User from '../models/User.js';
+import { getSuperadminOrgIds } from '../middleware/auth.js';
 
 // Weighted progress: done=1.0, in_review=0.66, in_progress=0.33, todo/backlog=0
 const STATUS_WEIGHT = { done: 1, completed: 1, in_review: 0.66, in_progress: 0.33, todo: 0, backlog: 0 };
@@ -82,10 +83,15 @@ export const create = async (req, res) => {
 
 export const getAll = async (req, res) => {
   try {
-    const { clientId, status, organizationId } = req.query;
-    // Superadmin can pass organizationId as query param to scope projects
-    const orgId = req.user.organizationId || (req.user.role === 'superadmin' ? organizationId : null);
-    const filter = { organizationId: orgId };
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access project data.' });
+    }
+    const projectOrgIds = await getSuperadminOrgIds(req.user);
+    if (!projectOrgIds || projectOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const { clientId, status } = req.query;
+    const filter = { organizationId: { $in: projectOrgIds } };
 
     if (clientId) filter.clientId = clientId;
     if (status) filter.status = status;
@@ -111,9 +117,16 @@ export const getAll = async (req, res) => {
 
 export const getById = async (req, res) => {
   try {
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access project data.' });
+    }
+    const projectByIdOrgIds = await getSuperadminOrgIds(req.user);
+    if (!projectByIdOrgIds || projectByIdOrgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
     const project = await Project.findOne({
       _id: req.params.id,
-      organizationId: req.user.organizationId,
+      organizationId: { $in: projectByIdOrgIds },
     }).populate('clientId', 'name email phoneNumber');
 
     if (!project) {

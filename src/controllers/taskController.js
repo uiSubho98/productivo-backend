@@ -1,5 +1,6 @@
 import Task from '../models/Task.js';
 import { uploadFile } from '../services/storageService.js';
+import { getSuperadminOrgIds } from '../middleware/auth.js';
 
 export const create = async (req, res) => {
   try {
@@ -18,8 +19,11 @@ export const create = async (req, res) => {
       recurrenceEndDate,
     } = req.body;
 
-    // Superadmin may not have an organizationId, so they pass it in the body
-    const orgId = req.user.organizationId || (req.user.role === 'superadmin' ? req.body.organizationId : null);
+    // product_owner cannot create tasks — they have no org scope
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot create tasks.' });
+    }
+    const orgId = req.user.organizationId;
 
     const task = await Task.create({
       title,
@@ -59,7 +63,18 @@ export const create = async (req, res) => {
 export const getAll = async (req, res) => {
   try {
     const { projectId, status, assignee, categoryId, priority } = req.query;
-    const filter = { organizationId: req.user.organizationId };
+
+    // product_owner has no task data
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access task data.' });
+    }
+
+    // Resolve org scope: superadmin sees all their orgs; others see only their own
+    const orgIds = await getSuperadminOrgIds(req.user);
+    if (!orgIds || orgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
+    const filter = { organizationId: { $in: orgIds } };
 
     // Employees only see tasks assigned to them
     if (req.user.role === 'employee') {
@@ -93,9 +108,16 @@ export const getAll = async (req, res) => {
 
 export const getById = async (req, res) => {
   try {
+    if (req.user.role === 'product_owner') {
+      return res.status(403).json({ success: false, error: 'Product owner cannot access task data.' });
+    }
+    const orgIds = await getSuperadminOrgIds(req.user);
+    if (!orgIds || orgIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'No organization access.' });
+    }
     const task = await Task.findOne({
       _id: req.params.id,
-      organizationId: req.user.organizationId,
+      organizationId: { $in: orgIds },
     })
       .populate('assignees', 'name email avatar')
       .populate('categories', 'name')

@@ -44,11 +44,31 @@ const organizationSchema = new mongoose.Schema(
         ref: 'User',
       },
     ],
+    // The superadmin (paid user) who owns this org tree
+    superadminId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    // null = master org; set = child org under a master
+    parentOrgId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Organization',
+      default: null,
+    },
+    // Whether org_admins in this org can view invoices (superadmin grants this)
+    canViewInvoices: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,
   }
 );
+
+organizationSchema.index({ superadminId: 1 });
+organizationSchema.index({ parentOrgId: 1 });
 
 const Organization = mongoose.model('Organization', organizationSchema);
 

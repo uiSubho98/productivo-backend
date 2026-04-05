@@ -3,7 +3,7 @@ import Category, { DEFAULT_CATEGORIES } from '../models/Category.js';
 export const create = async (req, res) => {
   try {
     const { name, organizationId: bodyOrgId } = req.body;
-    const orgId = req.user.role === 'superadmin' && bodyOrgId
+    const orgId = req.user.role === 'product_owner' && bodyOrgId
       ? bodyOrgId
       : req.user.organizationId;
 
@@ -34,7 +34,7 @@ export const create = async (req, res) => {
 export const getAll = async (req, res) => {
   try {
     const { organizationId: queryOrgId } = req.query;
-    const orgId = req.user.role === 'superadmin' && queryOrgId
+    const orgId = req.user.role === 'product_owner' && queryOrgId
       ? queryOrgId
       : req.user.organizationId;
 
@@ -117,7 +117,7 @@ export const remove = async (req, res) => {
 export const seedDefaults = async (req, res) => {
   try {
     const { organizationId: bodyOrgId } = req.body;
-    const orgId = req.user.role === 'superadmin' && bodyOrgId
+    const orgId = req.user.role === 'product_owner' && bodyOrgId
       ? bodyOrgId
       : req.user.organizationId;
 

@@ -1,12 +1,21 @@
 import User from '../models/User.js';
+import Organization from '../models/Organization.js';
 
 export const getAll = async (req, res) => {
   try {
     const { search, role, organizationId, page = 1, limit = 20 } = req.query;
-    const filter = {};
+
+    // Collect all org IDs owned by this superadmin (master + sub-orgs)
+    const ownedOrgs = await Organization.find({ superadminId: req.user._id }).select('_id').lean();
+    const orgIds = ownedOrgs.map((o) => o._id);
+
+    const filter = {
+      organizationId: organizationId
+        ? organizationId  // caller filtered to a specific org
+        : { $in: orgIds }, // all orgs in the tree
+    };
 
     if (role) filter.role = role;
-    if (organizationId) filter.organizationId = organizationId;
 
     if (search) {
       filter.$or = [
@@ -45,7 +54,10 @@ export const getAll = async (req, res) => {
 
 export const getById = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id)
+    const ownedOrgs = await Organization.find({ superadminId: req.user._id }).select('_id').lean();
+    const orgIds = ownedOrgs.map((o) => o._id);
+
+    const user = await User.findOne({ _id: req.params.id, organizationId: { $in: orgIds } })
       .select('-passwordHash -mpinHash')
       .populate('organizationId', 'name logo');
 
@@ -69,7 +81,14 @@ export const updateUser = async (req, res) => {
     if (role !== undefined && ['org_admin', 'employee'].includes(role)) updateData.role = role;
     if (isActive !== undefined) updateData.isActive = isActive;
 
-    const user = await User.findByIdAndUpdate(req.params.id, updateData, { new: true })
+    const ownedOrgs = await Organization.find({ superadminId: req.user._id }).select('_id').lean();
+    const orgIds = ownedOrgs.map((o) => o._id);
+
+    const user = await User.findOneAndUpdate(
+      { _id: req.params.id, organizationId: { $in: orgIds } },
+      updateData,
+      { new: true }
+    )
       .select('-passwordHash -mpinHash')
       .populate('organizationId', 'name logo');
 
@@ -86,13 +105,16 @@ export const updateUser = async (req, res) => {
 
 export const deleteUser = async (req, res) => {
   try {
-    const target = await User.findById(req.params.id);
+    const ownedOrgs = await Organization.find({ superadminId: req.user._id }).select('_id').lean();
+    const orgIds = ownedOrgs.map((o) => o._id);
+
+    const target = await User.findOne({ _id: req.params.id, organizationId: { $in: orgIds } });
     if (!target) {
       return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
     if (target.role === 'superadmin') {
-      return res.status(403).json({ success: false, error: 'Cannot delete superadmin.' });
+      return res.status(403).json({ success: false, error: 'Cannot delete superadmin accounts.' });
     }
 
     if (target._id.toString() === req.user._id.toString()) {

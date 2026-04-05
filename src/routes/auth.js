@@ -4,6 +4,7 @@ import rateLimit from 'express-rate-limit';
 import validate from '../middleware/validate.js';
 import { authenticate } from '../middleware/auth.js';
 import {
+  register,
   login,
   setupBiometric,
   setupMpin,
@@ -13,6 +14,9 @@ import {
   forgotPassword,
   verifyOtp,
   resetPassword,
+  signupRequestOtp,
+  signupVerifyOtp,
+  deleteOwnAccount,
 } from '../controllers/authController.js';
 
 const router = Router();
@@ -32,7 +36,36 @@ const forgotPasswordLimiter = rateLimit({
   skipSuccessfulRequests: false,
 });
 
-// No signup — superadmin is seeded, members are added via org admin
+// Email-only signup — step 1: send OTP
+router.post(
+  '/signup/request-otp',
+  forgotPasswordLimiter, // re-use same 3/15min rate limit
+  validate([body('email').isEmail().withMessage('Valid email is required').normalizeEmail()]),
+  signupRequestOtp
+);
+
+// Email-only signup — step 2: verify OTP → create account + issue JWT
+router.post(
+  '/signup/verify-otp',
+  validate([
+    body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
+    body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits').isNumeric(),
+  ]),
+  signupVerifyOtp
+);
+
+// Legacy public signup — creates free superadmin + org + subscription
+router.post(
+  '/register',
+  validate([
+    body('name').trim().notEmpty().withMessage('Name is required').isLength({ max: 100 }),
+    body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('orgName').trim().notEmpty().withMessage('Organisation name is required').isLength({ max: 200 }),
+  ]),
+  register
+);
+
 router.post(
   '/login',
   validate([
@@ -85,7 +118,7 @@ router.post(
   '/verify-otp',
   validate([
     body('email').isEmail().withMessage('Valid email required').normalizeEmail(),
-    body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits').isNumeric(),
+    body('otp').isLength({ min: 4, max: 4 }).withMessage('OTP must be 4 digits').isNumeric(),
   ]),
   verifyOtp
 );
@@ -94,7 +127,7 @@ router.post(
   '/reset-password',
   validate([
     body('email').isEmail().withMessage('Valid email required').normalizeEmail(),
-    body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits').isNumeric(),
+    body('otp').isLength({ min: 4, max: 4 }).withMessage('OTP must be 4 digits').isNumeric(),
     body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   ]),
   resetPassword
@@ -110,5 +143,7 @@ router.put(
   ]),
   updateProfile
 );
+
+router.delete('/account', authenticate, deleteOwnAccount);
 
 export default router;
