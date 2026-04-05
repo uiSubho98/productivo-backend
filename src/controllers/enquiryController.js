@@ -1,4 +1,4 @@
-import Enquiry from '../Models/Enquiry.js';
+import Enquiry from '../models/Enquiry.js';
 
 // POST /api/v1/enquiries — public, no auth required
 export const createEnquiry = async (req, res) => {
