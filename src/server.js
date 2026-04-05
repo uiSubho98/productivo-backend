@@ -26,6 +26,7 @@ import dashboardRoutes from './routes/dashboard.js';
 import imageProxyRoutes from './routes/imageProxy.js';
 import whatsappRoutes from './routes/whatsapp.js';
 import locationRoutes from './routes/location.js';
+import enquiryRoutes from './routes/enquiries.js';
 import { setSocketIo } from './controllers/whatsappController.js';
 
 const app = express();
@@ -52,9 +53,25 @@ io.on('connection', (socket) => {
 
 setSocketIo(io);
 
+// Static landing page
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+app.use(express.static(join(__dirname, '../public')));
+
 // Security & parsing middleware
-app.use(helmet());
-app.use(cors());
+app.use(helmet({
+  contentSecurityPolicy: false, // allow inline styles in landing page
+}));
+app.use(cors({
+  origin: [
+    'https://crm.productivo.in',
+    'https://www.productivo.in',
+    'http://localhost:5173',
+    'http://localhost:3000',
+  ],
+  credentials: true,
+}));
 app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -86,6 +103,7 @@ app.use('/api/v1/image-proxy', imageProxyRoutes);
 app.use('/api/v1/whatsapp', whatsappRoutes);
 app.use('/api/v1/superadmin', superAdminRoutes);
 app.use('/api/v1/location', locationRoutes);
+app.use('/api/v1/enquiries', enquiryRoutes);
 
 // 404 handler
 app.use((req, res) => {
