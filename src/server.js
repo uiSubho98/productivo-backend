@@ -38,7 +38,7 @@ const httpServer = createServer(app);
 // Socket.io — rooms are keyed by organizationId so broadcasts are org-scoped
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: env.nodeEnv === 'production' ? env.clientOrigin : '*',
+    origin: '*',
     methods: ['GET', 'POST'],
   },
 });
@@ -67,8 +67,10 @@ app.use(helmet({
   contentSecurityPolicy: false, // allow inline styles in landing page
 }));
 app.use(cors({
-  origin: true,
-  credentials: true,
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
 }));
 app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '10mb' }));
