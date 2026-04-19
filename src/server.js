@@ -72,6 +72,11 @@ app.use(express.static(join(__dirname, '../public'), {
   },
 }));
 
+// We sit behind nginx/CloudPanel. Trust the first proxy hop so Express can
+// read X-Forwarded-For correctly (needed by express-rate-limit v7+, which
+// otherwise crashes with ERR_ERL_KEY_GEN_IPV6).
+app.set('trust proxy', 1);
+
 // Security & parsing middleware
 app.use(helmet({
   contentSecurityPolicy: false, // allow inline styles in landing page

@@ -13,7 +13,6 @@ const clientSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
       default: null,
-      sparse: true,
     },
     whatsappNumber: {
       type: String,
@@ -22,7 +21,6 @@ const clientSchema = new mongoose.Schema(
     phoneNumber: {
       type: String,
       default: null,
-      sparse: true,
     },
     address: {
       street: { type: String, default: '' },

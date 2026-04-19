@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { body } from 'express-validator';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
@@ -42,11 +42,15 @@ const GOOGLE_SCOPES = [
 
 const router = Router();
 
-// Per-email rate limit for forgot-password: max 3 requests per 15 minutes
+// Per-email rate limit for forgot-password: max 3 requests per 15 minutes.
+// Uses the library's IPv6-safe ipKeyGenerator as a fallback when no email is supplied.
 const forgotPasswordLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 3,
-  keyGenerator: (req) => (req.body?.email || req.ip).toLowerCase().trim(),
+  keyGenerator: (req, res) => {
+    const email = (req.body?.email || '').toString().trim().toLowerCase();
+    return email || ipKeyGenerator(req, res);
+  },
   handler: (_req, res) =>
     res.status(429).json({
       success: false,

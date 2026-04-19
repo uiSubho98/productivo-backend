@@ -20,7 +20,8 @@
       "Bash(node --check src/models/Invoice.js src/controllers/invoiceController.js src/controllers/whatsappAddonController.js)",
       "Bash(curl -sI -w \"HTTP_CODE=%{http_code}\\\\n\" http://localhost:3001/api/v1/public/invoices/000000000000000000000000/invoice.pdf)",
       "Bash(npm ls *)",
-      "Bash(node --check src/controllers/attendanceController.js src/controllers/taskTimerController.js src/controllers/organizationController.js src/routes/organizations.js src/jobs/scheduler.js src/models/AttendanceEntry.js src/models/TaskTimeLog.js)"
+      "Bash(node --check src/controllers/attendanceController.js src/controllers/taskTimerController.js src/controllers/organizationController.js src/routes/organizations.js src/jobs/scheduler.js src/models/AttendanceEntry.js src/models/TaskTimeLog.js)",
+      "Bash(node --check src/server.js src/routes/auth.js src/models/Client.js src/models/WhatsappAddon.js src/models/Subscription.js)"
     ],
     "additionalDirectories": [
       "/Users/subhojitdutta/Desktop/d/productivo-crm/src/services",

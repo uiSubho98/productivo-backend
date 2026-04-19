@@ -25,7 +25,6 @@ const whatsappAddonSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
       unique: true,
-      index: true,
     },
     addons: { type: [addonItemSchema], default: [] },
   },

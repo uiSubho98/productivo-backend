@@ -87,7 +87,7 @@ const subscriptionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-subscriptionSchema.index({ userId: 1 });
+// userId has `unique: true` on the field definition — no extra index needed.
 
 /**
  * Returns true if the subscription is currently active and not expired.
