@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo \"---exit:$?\")",
+      "Read(//Users/subhojitdutta/Desktop/d/productivo-crm/**)",
+      "Read(//Users/subhojitdutta/Desktop/d/productivo-crm/src/**)",
+      "Bash(node --check src/services/wabridgeService.js src/models/WhatsappAddon.js src/controllers/whatsappAddonController.js src/routes/whatsappAddons.js src/controllers/paymentController.js src/server.js)",
+      "Bash(npx eslint *)",
+      "Bash(node --check src/controllers/paymentController.js src/controllers/subscriptionController.js src/services/cashfreeService.js src/models/Purchase.js src/config/env.js src/server.js)",
+      "Bash(npm run *)",
+      "Bash(node src/scripts/set-phone-subho.js)",
+      "Bash(node --check src/models/User.js src/models/PhoneChangeRequest.js src/controllers/phoneController.js src/controllers/paymentController.js src/routes/auth.js src/scripts/set-phone-subho.js)",
+      "Bash(node --check src/controllers/paymentController.js src/controllers/phoneController.js src/controllers/subscriptionController.js src/services/cashfreeService.js src/models/User.js src/models/Purchase.js src/models/PhoneChangeRequest.js src/routes/auth.js src/server.js)",
+      "Bash(node -e ' *)",
+      "Bash(node --check src/controllers/whatsappAddonController.js src/routes/whatsappAddons.js src/controllers/paymentController.js)",
+      "Bash(node --check src/controllers/organizationController.js src/controllers/phoneController.js src/controllers/whatsappAddonController.js src/models/User.js)",
+      "Bash(curl -s http://localhost:3001/)",
+      "Bash(curl -sI http://localhost:3001/)",
+      "Bash(curl -s -X POST http://localhost:3001/api/v1/payments/initiate -H 'Content-Type: application/json' -H 'Origin: http://localhost:3001' --data-raw '{\"name\":\"Subhojit Dutta\",\"email\":\"dsubhojit062@gmail.com\",\"phone\":\"87777468277\"}')",
+      "Bash(node --check src/models/Invoice.js src/controllers/invoiceController.js src/controllers/whatsappAddonController.js)",
+      "Bash(curl -sI -w \"HTTP_CODE=%{http_code}\\\\n\" http://localhost:3001/api/v1/public/invoices/000000000000000000000000/invoice.pdf)",
+      "Bash(npm ls *)",
+      "Bash(node --check src/controllers/attendanceController.js src/controllers/taskTimerController.js src/controllers/organizationController.js src/routes/organizations.js src/jobs/scheduler.js src/models/AttendanceEntry.js src/models/TaskTimeLog.js)"
+    ],
+    "additionalDirectories": [
+      "/Users/subhojitdutta/Desktop/d/productivo-crm/src/services",
+      "/Users/subhojitdutta/Desktop/d/productivo-crm/src/store",
+      "/Users/subhojitdutta/Desktop/d/productivo-crm/src/pages",
+      "/Users/subhojitdutta/Desktop/d/productivo-crm/src/components/layout",
+      "/Users/subhojitdutta/Desktop/d/productivo-crm/src"
+    ]
+  }
+}

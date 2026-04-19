@@ -6,6 +6,9 @@ import { uploadSingle, handleUploadError } from '../middleware/upload.js';
 import {
   create, getAll, getById, update, remove, addSubtask, updateSubtask, addAttachment,
 } from '../controllers/taskController.js';
+import {
+  startTimer, stopTimer, getTimerState, listTaskLogs,
+} from '../controllers/taskTimerController.js';
 
 const router = Router();
 
@@ -49,5 +52,11 @@ router.put('/:id/subtasks/:subtaskId',
 );
 
 router.post('/:id/attachments', uploadSingle('file'), handleUploadError, addAttachment);
+
+// Task timer — any org member can track their own time on any task they can view
+router.get('/:id/timer', getTimerState);
+router.post('/:id/timer/start', startTimer);
+router.post('/:id/timer/stop', stopTimer);
+router.get('/:id/time-logs', listTaskLogs);
 
 export default router;

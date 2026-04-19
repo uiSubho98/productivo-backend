@@ -19,6 +19,49 @@ import { isWhatsappEnabledForOrg } from '../services/whatsappFeatureService.js';
  * - product_owner: NO — product owner cannot view/manage client invoices
  * - org_admin: only if their org has canViewInvoices = true
  */
+/**
+ * Ensure an invoice has a publicly accessible PDF URL.
+ * Returns the existing url if present, otherwise generates + uploads a fresh one.
+ * Used by the WhatsApp addon to attach the PDF as a template header.
+ */
+export async function ensureInvoicePdfUrl(invoiceId) {
+  const invoice = await Invoice.findById(invoiceId);
+  if (!invoice) throw new Error('Invoice not found');
+  if (invoice.pdfUrl) return invoice.pdfUrl;
+
+  const org = await Organization.findById(invoice.organizationId);
+  const client = await Client.findById(invoice.clientId);
+  if (!org || !client) throw new Error('Cannot generate PDF — missing org or client');
+
+  let paymentAccounts = [];
+  if (invoice.paymentAccountIds?.length) {
+    paymentAccounts = await PaymentAccount.find({ _id: { $in: invoice.paymentAccountIds } });
+  }
+  if (!paymentAccounts.length) {
+    paymentAccounts = await PaymentAccount.find({ organizationId: invoice.organizationId, isActive: true });
+  }
+
+  let project = null;
+  if (invoice.projectId) project = await Project.findById(invoice.projectId).select('name');
+
+  const pdfData = {
+    ...invoice.toObject(),
+    paymentAccounts: paymentAccounts.map((a) => a.toObject()),
+    project: project ? { name: project.name } : null,
+  };
+
+  const pdfBuffer = await generateInvoicePdf(pdfData, org.toObject(), client.toObject());
+  const { url } = await uploadFile(
+    pdfBuffer,
+    `${invoice.invoiceNumber}.pdf`,
+    'application/pdf',
+    'invoices'
+  );
+  invoice.pdfUrl = url;
+  await invoice.save();
+  return url;
+}
+
 async function canUserViewInvoices(user) {
   if (user.role === 'product_owner') return false;
   if (user.role === 'superadmin') return true;
@@ -62,7 +105,7 @@ export const create = async (req, res) => {
       return res.status(403).json({ success: false, error: 'Invoice access not granted for your organization. Ask your superadmin to enable it.' });
     }
 
-    const { clientId, projectId, items, taxPercentage, notes, paymentAccountIds } = req.body;
+    const { clientId, projectId, items, taxPercentage, notes, paymentAccountIds, purpose, dueDate } = req.body;
     const organizationId = req.user.organizationId;
 
     if (!organizationId) {
@@ -93,6 +136,8 @@ export const create = async (req, res) => {
       taxAmount,
       total,
       notes: notes || '',
+      purpose: (purpose || '').toString().trim().slice(0, 200),
+      dueDate: dueDate ? new Date(dueDate) : null,
       paymentAccountIds: Array.isArray(paymentAccountIds) ? paymentAccountIds.slice(0, 3) : [],
       activityLog: [{ action: 'Created', by: req.user._id }],
     });
@@ -256,7 +301,7 @@ export const update = async (req, res) => {
     if (!(await canUserMutateInvoices(req.user))) {
       return res.status(403).json({ success: false, error: req.user.role === 'product_owner' ? 'Product owner cannot modify invoices.' : 'Invoice access not granted for your organization.' });
     }
-    const { items, taxPercentage, notes, status, paymentAccountIds } = req.body;
+    const { items, taxPercentage, notes, status, paymentAccountIds, purpose, dueDate } = req.body;
     const updateData = {};
 
     if (items !== undefined) {
@@ -279,6 +324,8 @@ export const update = async (req, res) => {
 
     if (notes !== undefined) updateData.notes = notes;
     if (status !== undefined) updateData.status = status;
+    if (purpose !== undefined) updateData.purpose = (purpose || '').toString().trim().slice(0, 200);
+    if (dueDate !== undefined) updateData.dueDate = dueDate ? new Date(dueDate) : null;
     if (paymentAccountIds !== undefined) updateData.paymentAccountIds = Array.isArray(paymentAccountIds) ? paymentAccountIds.slice(0, 3) : [];
     if (taxPercentage !== undefined && !items) {
       // Recalculate totals using existing subtotal

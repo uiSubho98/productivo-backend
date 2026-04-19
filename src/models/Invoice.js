@@ -83,6 +83,18 @@ const invoiceSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    // What the invoice is for — e.g. "Website Development". Used in emails/WhatsApp templates.
+    purpose: {
+      type: String,
+      default: '',
+      trim: true,
+      maxlength: 200,
+    },
+    // When payment is due. If absent, downstream code falls back to createdAt + 30 days.
+    dueDate: {
+      type: Date,
+      default: null,
+    },
     paymentAccountIds: {
       type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'PaymentAccount' }],
       default: [],

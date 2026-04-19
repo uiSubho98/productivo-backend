@@ -2,11 +2,10 @@
  * Subscription controller.
  *
  * GET  /api/v1/subscription          — current user's plan status
- * POST /api/v1/subscription/upgrade  — initiate Instamojo payment for Pro upgrade
+ * POST /api/v1/subscription/upgrade  — initiate Cashfree payment for Pro upgrade
  * POST /api/v1/subscription/activate — called internally after payment confirmed
  */
 
-import axios from 'axios';
 import Subscription from '../models/Subscription.js';
 import Purchase from '../models/Purchase.js';
 import Organization from '../models/Organization.js';
@@ -15,22 +14,10 @@ import Client from '../models/Client.js';
 import Project from '../models/Project.js';
 import Invoice from '../models/Invoice.js';
 import { PLANS } from '../models/Subscription.js';
+import * as cashfree from '../services/cashfreeService.js';
 
-const INSTAMOJO_API = 'https://test.instamojo.com/api/1.1';
-const PRIVATE_KEY = 'be67949eae1c1694cec1dc4778e17321';
-const AUTH_TOKEN = '6259e4a4fdf6b9fe1c358aa1a97ee748';
-
-const instamojoHeaders = {
-  'X-Api-Key': PRIVATE_KEY,
-  'X-Auth-Token': AUTH_TOKEN,
-  'Content-Type': 'application/x-www-form-urlencoded',
-};
-
-function encodeForm(obj) {
-  return Object.entries(obj)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-    .join('&');
-}
+const PRO_AMOUNT = 1499;
+const WEBHOOK_URL = 'https://www.productivo.in/api/v1/payments/webhook';
 
 /**
  * GET /api/v1/subscription
@@ -100,7 +87,7 @@ export const getSubscription = async (req, res) => {
 
 /**
  * POST /api/v1/subscription/upgrade
- * Initiates an Instamojo payment for upgrading to Pro.
+ * Initiates a Cashfree Payment Link for upgrading to Pro.
  * Body: { name, email, phone }
  * Returns: { paymentUrl, purchaseId }
  */
@@ -118,43 +105,35 @@ export const initiateUpgrade = async (req, res) => {
       email,
       phone,
       plan: 'Pro',
-      amount: 1499,
+      amount: PRO_AMOUNT,
       status: 'pending',
       type: 'upgrade',
-      // store userId in a metadata field for activation
       userId: userId || undefined,
     });
 
     const baseUrl = req.headers.origin || 'https://www.productivo.in';
-    const redirectUrl = `${baseUrl}/payment-success?pid=${purchase._id}&upgrade=1`;
-    const webhookUrl = `https://www.productivo.in/api/v1/payments/webhook`;
+    const returnUrl = `${baseUrl}/payment-success?pid=${purchase._id}&upgrade=1`;
+    const linkId = `upgrade_${purchase._id}_${Date.now().toString(36)}`;
 
-    const formData = encodeForm({
+    const link = await cashfree.createPaymentLink({
+      linkId,
+      amount: PRO_AMOUNT,
       purpose: 'Productivo Pro Plan - 1 Year',
-      amount: '1499',
-      buyer_name: name,
-      email,
-      phone,
-      redirect_url: redirectUrl,
-      webhook: webhookUrl,
-      allow_repeated_payments: 'False',
-      send_email: 'False',
-      send_sms: 'False',
+      customerName: name,
+      customerEmail: email,
+      customerPhone: phone,
+      returnUrl,
+      notifyUrl: WEBHOOK_URL,
     });
 
-    const instaRes = await axios.post(`${INSTAMOJO_API}/payment-requests/`, formData, {
-      headers: instamojoHeaders,
-    });
-
-    const paymentRequest = instaRes.data.payment_request;
-    await Purchase.findByIdAndUpdate(purchase._id, {
-      paymentRequestId: paymentRequest.id,
-      paymentUrl: paymentRequest.longurl,
-    });
+    purchase.cashfreeLinkId = link.linkId;
+    purchase.cashfreeLinkStatus = link.status;
+    purchase.paymentUrl = link.linkUrl;
+    await purchase.save();
 
     return res.status(200).json({
       success: true,
-      paymentUrl: paymentRequest.longurl,
+      paymentUrl: link.linkUrl,
       purchaseId: purchase._id,
     });
   } catch (err) {
@@ -164,10 +143,8 @@ export const initiateUpgrade = async (req, res) => {
 };
 
 /**
- * POST /api/v1/subscription/activate
  * Activates Pro subscription after confirmed payment.
  * Called internally from paymentController on success.
- * Body: { purchaseId, userId }
  */
 export const activateSubscription = async (purchaseId, userId) => {
   try {

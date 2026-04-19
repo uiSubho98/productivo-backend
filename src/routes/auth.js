@@ -1,8 +1,21 @@
 import { Router } from 'express';
 import { body } from 'express-validator';
 import rateLimit from 'express-rate-limit';
+import { writeFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 import validate from '../middleware/validate.js';
 import { authenticate } from '../middleware/auth.js';
+import { getGoogleAuthClient } from '../config/googleAuth.js';
+import env from '../config/env.js';
+import {
+  setPhone,
+  requestPhoneChange,
+  updatePhone,
+  listPendingRequests,
+  approvePhoneChange,
+  rejectPhoneChange,
+} from '../controllers/phoneController.js';
 import {
   register,
   login,
@@ -18,6 +31,14 @@ import {
   signupVerifyOtp,
   deleteOwnAccount,
 } from '../controllers/authController.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const TOKEN_PATH = resolve(__dirname, '../../.google-tokens.json');
+const GOOGLE_SCOPES = [
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/drive.file',
+];
 
 const router = Router();
 
@@ -145,5 +166,59 @@ router.put(
 );
 
 router.delete('/account', authenticate, deleteOwnAccount);
+
+// Profile phone — one-time set, request-change, update during 24h approval window
+router.post('/profile/phone', authenticate, setPhone);
+router.patch('/profile/phone', authenticate, updatePhone);
+router.post('/profile/phone/request-change', authenticate, requestPhoneChange);
+
+// Superadmin review of phone change requests
+router.get('/phone-change-requests', authenticate, listPendingRequests);
+router.post('/phone-change-requests/:id/approve', authenticate, approvePhoneChange);
+router.post('/phone-change-requests/:id/reject', authenticate, rejectPhoneChange);
+
+// Kick off Google OAuth flow — visit this URL in a browser to (re)authorize
+router.get('/google', (_req, res) => {
+  const client = getGoogleAuthClient();
+  const url = client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: GOOGLE_SCOPES,
+    redirect_uri: env.googleRedirectUri,
+  });
+  res.redirect(url);
+});
+
+// OAuth callback — exchanges the authorization code for tokens and persists them
+router.get('/google/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error) return res.status(400).send(`Google auth error: ${error}`);
+  if (!code) return res.status(400).send('Missing authorization code');
+
+  try {
+    const client = getGoogleAuthClient();
+    const { tokens } = await client.getToken({
+      code,
+      redirect_uri: env.googleRedirectUri,
+    });
+
+    if (!tokens.refresh_token) {
+      return res
+        .status(400)
+        .send(
+          'No refresh token returned. Revoke the app at https://myaccount.google.com/permissions and retry.'
+        );
+    }
+
+    client.setCredentials(tokens);
+    writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2));
+    console.log('[Google Auth] New tokens saved to .google-tokens.json');
+
+    res.send('Google authorization successful. You can close this tab.');
+  } catch (err) {
+    console.error('[Google Auth] Callback failed:', err.message);
+    res.status(500).send(`Authorization failed: ${err.message}`);
+  }
+});
 
 export default router;

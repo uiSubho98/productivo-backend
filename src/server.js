@@ -30,6 +30,10 @@ import enquiryRoutes from './routes/enquiries.js';
 import paymentRoutes from './routes/payments.js';
 import subscriptionRoutes from './routes/subscription.js';
 import featureFlagRoutes from './routes/featureFlags.js';
+import whatsappAddonRoutes from './routes/whatsappAddons.js';
+import usageRoutes from './routes/usage.js';
+import invoicesPublicRoutes from './routes/invoicesPublic.js';
+import attendanceRoutes from './routes/attendance.js';
 import { setSocketIo } from './controllers/whatsappController.js';
 
 const app = express();
@@ -56,11 +60,17 @@ io.on('connection', (socket) => {
 
 setSocketIo(io);
 
-// Static landing page
+// Static landing page — disable HTML caching so updates roll out instantly
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
-app.use(express.static(join(__dirname, '../public')));
+app.use(express.static(join(__dirname, '../public'), {
+  setHeaders: (res, path) => {
+    if (path.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    }
+  },
+}));
 
 // Security & parsing middleware
 app.use(helmet({
@@ -73,7 +83,13 @@ app.use(cors({
   credentials: false,
 }));
 app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+  limit: '10mb',
+  // Preserve the raw body so we can verify Cashfree webhook signatures
+  verify: (req, _res, buf) => {
+    if (buf && buf.length) req.rawBody = buf.toString('utf8');
+  },
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(activityLogger);
 
@@ -107,6 +123,10 @@ app.use('/api/v1/enquiries', enquiryRoutes);
 app.use('/api/v1/payments', paymentRoutes);
 app.use('/api/v1/subscription', subscriptionRoutes);
 app.use('/api/v1/feature-flags', featureFlagRoutes);
+app.use('/api/v1/whatsapp-addons', whatsappAddonRoutes);
+app.use('/api/v1/usage', usageRoutes);
+app.use('/api/v1/public/invoices', invoicesPublicRoutes); // public PDF proxy for WhatsApp document templates
+app.use('/api/v1/attendance', attendanceRoutes);
 
 // 404 handler
 app.use((req, res) => {

@@ -247,8 +247,27 @@ export const getMembers = async (req, res) => {
 
 export const addMember = async (req, res) => {
   try {
-    const { email, name, password, role } = req.body;
+    const { email, name, password, role, phoneNumber } = req.body;
     const { id: orgId } = req.params;
+
+    // Phone number is mandatory for all new members
+    const phone = (phoneNumber || '').toString().trim();
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (!phone || phoneDigits.length < 10 || phoneDigits.length > 15) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid phone number (10–15 digits) is required.',
+      });
+    }
+
+    // Phone must be unique across all users
+    const phoneDup = await User.findOne({ phoneNumber: phone }).select('_id email').lean();
+    if (phoneDup && (!email || phoneDup.email !== email.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        error: 'This phone number is already registered to another user.',
+      });
+    }
 
     // Non-product_owner can only add members to their own org
     if (req.user.role !== 'product_owner' && req.user.organizationId?.toString() !== orgId) {
@@ -284,10 +303,10 @@ export const addMember = async (req, res) => {
         });
       }
 
-      await User.findByIdAndUpdate(user._id, {
-        organizationId: orgId,
-        role: assignRole,
-      });
+      // If the existing user has no phone, backfill from the form value
+      const updates = { organizationId: orgId, role: assignRole };
+      if (!user.phoneNumber) updates.phoneNumber = phone;
+      await User.findByIdAndUpdate(user._id, updates);
 
       return res.status(200).json({
         success: true,
@@ -312,6 +331,7 @@ export const addMember = async (req, res) => {
       passwordHash,
       role: assignRole,
       organizationId: orgId,
+      phoneNumber: phone,
       isActive: true,
     });
 
@@ -417,6 +437,141 @@ export const removeMember = async (req, res) => {
  * PATCH /api/v1/organizations/:id/invoice-permission
  * Superadmin (owner of this org tree) or product_owner can toggle canViewInvoices.
  */
+/**
+ * GET /api/v1/organizations/tree
+ * Returns org hierarchy scoped to the caller's role:
+ *   - product_owner: every superadmin as a top-level node, each with their org tree
+ *   - superadmin:    their own orgs as a single tree rooted at the master org
+ *   - org_admin:     just their own org (flat, 1-node)
+ */
+export const getOrgTree = async (req, res) => {
+  try {
+    const user = req.user;
+
+    // Helper: given a list of orgs, return root nodes with nested `children`.
+    const buildTree = (orgs) => {
+      const byId = new Map();
+      const childrenByParent = new Map();
+      for (const o of orgs) {
+        byId.set(String(o._id), { ...o, children: [] });
+      }
+      for (const o of orgs) {
+        const parent = o.parentOrgId ? String(o.parentOrgId) : null;
+        if (parent && byId.has(parent)) {
+          byId.get(parent).children.push(byId.get(String(o._id)));
+        } else {
+          if (!childrenByParent.has('ROOT')) childrenByParent.set('ROOT', []);
+          childrenByParent.get('ROOT').push(byId.get(String(o._id)));
+        }
+      }
+      return childrenByParent.get('ROOT') || [];
+    };
+
+    // Helper: enrich each org with member counts + admin names
+    const enrichOrgs = async (orgs) => {
+      const orgIds = orgs.map((o) => o._id);
+      const memberCounts = await User.aggregate([
+        { $match: { organizationId: { $in: orgIds }, isActive: true } },
+        { $group: { _id: { orgId: '$organizationId', role: '$role' }, count: { $sum: 1 } } },
+      ]);
+      const countMap = {};
+      for (const row of memberCounts) {
+        const k = String(row._id.orgId);
+        if (!countMap[k]) countMap[k] = { total: 0, org_admin: 0, employee: 0, superadmin: 0 };
+        countMap[k].total += row.count;
+        countMap[k][row._id.role] = row.count;
+      }
+      return orgs.map((o) => ({
+        ...o,
+        memberCounts: countMap[String(o._id)] || { total: 0, org_admin: 0, employee: 0, superadmin: 0 },
+      }));
+    };
+
+    if (user.role === 'product_owner') {
+      // All superadmins → each as a top-level node with their org tree
+      const superadmins = await User.find({ role: 'superadmin', isActive: true })
+        .select('name email')
+        .sort({ name: 1 })
+        .lean();
+      const allOrgs = await Organization.find({})
+        .select('name superadminId parentOrgId logo')
+        .sort({ name: 1 })
+        .lean();
+      const enriched = await enrichOrgs(allOrgs);
+
+      const rootNodes = superadmins.map((sa) => {
+        const orgsOfSA = enriched.filter((o) => String(o.superadminId) === String(sa._id));
+        return {
+          kind: 'superadmin',
+          id: sa._id,
+          name: sa.name,
+          email: sa.email,
+          orgs: buildTree(orgsOfSA),
+        };
+      });
+
+      // Orphaned orgs (no matching superadmin) — rare but show them
+      const orphanedOrgs = enriched.filter((o) => !o.superadminId);
+      if (orphanedOrgs.length) {
+        rootNodes.push({
+          kind: 'orphan',
+          name: 'Orphaned (no superadmin)',
+          orgs: buildTree(orphanedOrgs),
+        });
+      }
+      return res.status(200).json({ success: true, data: { scope: 'platform', roots: rootNodes } });
+    }
+
+    if (user.role === 'superadmin') {
+      const orgs = await Organization.find({ superadminId: user._id })
+        .select('name superadminId parentOrgId logo')
+        .sort({ name: 1 })
+        .lean();
+      const enriched = await enrichOrgs(orgs);
+      return res.status(200).json({
+        success: true,
+        data: {
+          scope: 'superadmin',
+          roots: [
+            {
+              kind: 'superadmin',
+              id: user._id,
+              name: user.name,
+              email: user.email,
+              orgs: buildTree(enriched),
+            },
+          ],
+        },
+      });
+    }
+
+    if (user.role === 'org_admin' && user.organizationId) {
+      const org = await Organization.findById(user.organizationId)
+        .select('name superadminId parentOrgId logo')
+        .lean();
+      if (!org) return res.status(200).json({ success: true, data: { scope: 'org', roots: [] } });
+      const enriched = await enrichOrgs([org]);
+      return res.status(200).json({
+        success: true,
+        data: {
+          scope: 'org',
+          roots: [
+            {
+              kind: 'org',
+              orgs: enriched.map((o) => ({ ...o, children: [] })),
+            },
+          ],
+        },
+      });
+    }
+
+    return res.status(403).json({ success: false, error: 'Not authorised.' });
+  } catch (err) {
+    console.error('getOrgTree error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to load org tree.' });
+  }
+};
+
 export const updateInvoicePermission = async (req, res) => {
   try {
     const { id } = req.params;

@@ -45,6 +45,18 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    // Profile phone number — set once by user, further changes require superadmin approval
+    phoneNumber: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+    // Once the superadmin approves a change request, this is set to (now + 24h);
+    // the user can update phoneNumber while this is in the future.
+    phoneEditUntil: {
+      type: Date,
+      default: null,
+    },
     biometricEnabled: {
       type: Boolean,
       default: false,
@@ -68,6 +80,8 @@ const userSchema = new mongoose.Schema(
 );
 
 userSchema.index({ organizationId: 1 });
+// Unique phone number across all users. `sparse` so multiple users without phone don't collide.
+userSchema.index({ phoneNumber: 1 }, { unique: true, sparse: true });
 
 const User = mongoose.model('User', userSchema);
 

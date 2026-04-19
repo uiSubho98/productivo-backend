@@ -13,6 +13,7 @@ import {
   addMember,
   removeMember,
   updateInvoicePermission,
+  getOrgTree,
 } from '../controllers/organizationController.js';
 
 const router = Router();
@@ -21,6 +22,7 @@ router.use(authenticate);
 
 // Anyone logged in can list their orgs or create one
 router.get('/', getAll);
+router.get('/tree', getOrgTree);
 
 router.post(
   '/',

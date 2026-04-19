@@ -2,6 +2,8 @@ import cron from 'node-cron';
 import Task from '../models/Task.js';
 import Meeting from '../models/Meeting.js';
 import User from '../models/User.js';
+import AttendanceEntry from '../models/AttendanceEntry.js';
+import TaskTimeLog from '../models/TaskTimeLog.js';
 import { sendEmail } from '../services/emailService.js';
 import { sendMessage } from '../services/whatsappService.js';
 import { isWhatsappEnabledForOrg } from '../services/whatsappFeatureService.js';
@@ -213,6 +215,67 @@ const checkOverdueReminders = () => {
 };
 
 /**
+ * Midnight IST — force-close any forgotten clock-ins and running task timers.
+ * Fires at 00:00 Asia/Kolkata. Stamps systemCheckout / systemStopped so the
+ * user and admin can see in the timesheet that it was auto-closed.
+ */
+const checkoutForgottenSessions = () => {
+  cron.schedule(
+    '0 0 * * *',
+    async () => {
+      try {
+        console.log('[CRON] Midnight IST — closing forgotten attendance + timers…');
+
+        // End at the exact moment the cron fires — "the day" ends here.
+        const closeAt = new Date();
+
+        // 1. Auto-close attendance entries that have a running loginAt
+        const openEntries = await AttendanceEntry.find({ loginAt: { $ne: null } });
+        for (const entry of openEntries) {
+          const startAt = entry.loginAt;
+          const durationMs = Math.max(0, closeAt - startAt);
+          entry.sessions.push({
+            startAt,
+            endAt: closeAt,
+            durationMs,
+            systemCheckout: true,
+          });
+          entry.totalDurationMs = (entry.totalDurationMs || 0) + durationMs;
+          entry.loginAt = null;
+          await entry.save();
+        }
+
+        // 2. Auto-stop any running task timers
+        const runningLogs = await TaskTimeLog.find({ endedAt: null });
+        let stoppedCount = 0;
+        for (const log of runningLogs) {
+          const durationMs = Math.max(0, closeAt - log.startedAt);
+          log.endedAt = closeAt;
+          log.durationMs = durationMs;
+          log.systemStopped = true;
+          await log.save();
+          await Task.updateOne(
+            { _id: log.taskId },
+            {
+              $inc: { totalTimeMs: durationMs },
+              $set: { activeTimerBy: null, activeTimerStartedAt: null },
+            }
+          );
+          stoppedCount++;
+        }
+
+        console.log(
+          `[CRON] Midnight IST: auto-checked-out ${openEntries.length} user(s), auto-stopped ${stoppedCount} timer(s).`
+        );
+      } catch (err) {
+        console.error('[CRON] Midnight checkout error:', err.message);
+      }
+    },
+    { timezone: 'Asia/Kolkata' }
+  );
+};
+
+/**
  * Initialize all cron jobs.
  */
 export const startScheduler = () => {
@@ -222,6 +285,7 @@ export const startScheduler = () => {
   checkMeetingReminders();
   checkTaskDueTomorrow();
   checkOverdueReminders();
+  checkoutForgottenSessions();
 };
 
 export default startScheduler;

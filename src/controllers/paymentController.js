@@ -1,26 +1,17 @@
-import axios from 'axios';
 import Purchase from '../models/Purchase.js';
+import WhatsappAddon, { ADDON_FEATURES, ADDON_PRICES } from '../models/WhatsappAddon.js';
 import { sendEmail } from '../services/emailService.js';
+import * as cashfree from '../services/cashfreeService.js';
 import { activateSubscription } from './subscriptionController.js';
 
-const INSTAMOJO_API = 'https://test.instamojo.com/api/1.1';
-const PRIVATE_KEY   = 'be67949eae1c1694cec1dc4778e17321';
-const AUTH_TOKEN    = '6259e4a4fdf6b9fe1c358aa1a97ee748';
+const PRO_AMOUNT = 1499;
+const WEBHOOK_URL = 'https://www.productivo.in/api/v1/payments/webhook';
 
-const instamojoHeaders = {
-  'X-Api-Key':      PRIVATE_KEY,
-  'X-Auth-Token':   AUTH_TOKEN,
-  'Content-Type':   'application/x-www-form-urlencoded',
-};
-
-// Helper: build URL-encoded body
-function encodeForm(obj) {
-  return Object.entries(obj)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-    .join('&');
+function buildLinkId(prefix, purchaseId) {
+  return `${prefix}_${purchaseId}_${Date.now().toString(36)}`;
 }
 
-// POST /api/v1/payments/initiate
+// POST /api/v1/payments/initiate — landing page Pro plan upgrade
 export const initiatePayment = async (req, res) => {
   try {
     const { name, email, phone } = req.body;
@@ -28,125 +19,259 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Name, email and phone are required.' });
     }
 
-    // Create purchase record
-    const purchase = await Purchase.create({ name, email, phone, status: 'pending', type: 'new_lead' });
+    const purchase = await Purchase.create({
+      name,
+      email,
+      phone,
+      amount: PRO_AMOUNT,
+      status: 'pending',
+      type: 'new_lead',
+    });
 
-    // Build redirect & webhook URLs
     const baseUrl = req.headers.origin || 'https://www.productivo.in';
-    const redirectUrl = `${baseUrl}/payment-success?pid=${purchase._id}`;
-    const webhookUrl  = `https://www.productivo.in/api/v1/payments/webhook`;
+    const returnUrl = `${baseUrl}/payment-success?pid=${purchase._id}`;
+    const linkId = buildLinkId('pro', purchase._id);
 
-    // Create Instamojo payment request
-    const formData = encodeForm({
-      purpose:      'Productivo Pro Plan - 1 Year',
-      amount:       '1499',
-      buyer_name:   name,
-      email:        email,
-      phone:        phone,
-      redirect_url: redirectUrl,
-      webhook:      webhookUrl,
-      allow_repeated_payments: 'False',
-      send_email:   'False',
-      send_sms:     'False',
+    const link = await cashfree.createPaymentLink({
+      linkId,
+      amount: PRO_AMOUNT,
+      purpose: 'Productivo Pro Plan - 1 Year',
+      customerName: name,
+      customerEmail: email,
+      customerPhone: phone,
+      returnUrl,
+      notifyUrl: WEBHOOK_URL,
     });
 
-    const instaRes = await axios.post(`${INSTAMOJO_API}/payment-requests/`, formData, {
-      headers: instamojoHeaders,
-    });
-
-    const paymentRequest = instaRes.data.payment_request;
-    await Purchase.findByIdAndUpdate(purchase._id, {
-      paymentRequestId: paymentRequest.id,
-      paymentUrl:       paymentRequest.longurl,
-    });
+    purchase.cashfreeLinkId = link.linkId;
+    purchase.cashfreeLinkStatus = link.status;
+    purchase.paymentUrl = link.linkUrl;
+    await purchase.save();
 
     return res.status(200).json({
-      success:    true,
-      paymentUrl: paymentRequest.longurl,
+      success: true,
+      paymentUrl: link.linkUrl,
       purchaseId: purchase._id,
     });
   } catch (err) {
     const detail = err.response?.data || err.message;
     console.error('initiatePayment error:', JSON.stringify(detail, null, 2));
-    return res.status(500).json({ success: false, error: 'Failed to create payment request.', detail });
+    const gatewayMsg = err.response?.data?.message || err.message;
+    return res.status(400).json({
+      success: false,
+      error: gatewayMsg || 'Failed to create payment request.',
+    });
   }
 };
 
-// POST /api/v1/payments/webhook  — called by Instamojo after payment
+// POST /api/v1/payments/addon/initiate — superadmin-only WhatsApp addon purchase
+// Phone auto-populated from user.phoneNumber (must be set in Settings → Profile first)
+export const initiateAddonPayment = async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    if (user.role !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Only the superadmin can purchase WhatsApp add-ons.',
+      });
+    }
+    const phone = (user.phoneNumber || '').toString().trim();
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Set your phone number in Settings → Profile before purchasing.',
+      });
+    }
+
+    const rawFeatures = Array.isArray(req.body?.features) ? req.body.features : [];
+    const features = [...new Set(rawFeatures)].filter((f) => ADDON_FEATURES.includes(f));
+    if (!features.length) {
+      return res.status(400).json({
+        success: false,
+        error: `features must be a non-empty subset of [${ADDON_FEATURES.join(', ')}]`,
+      });
+    }
+
+    const isBundle = features.length === ADDON_FEATURES.length;
+    const amount = isBundle ? ADDON_PRICES.bundle : features.length * ADDON_PRICES.invoice;
+    const purpose = isBundle
+      ? 'Productivo WhatsApp Add-ons — All 3 (1 Year)'
+      : `Productivo WhatsApp Add-on — ${features.join(', ')} (1 Year)`;
+
+    const purchase = await Purchase.create({
+      name: user.name,
+      email: user.email,
+      phone,
+      plan: 'WhatsApp Addon',
+      amount,
+      type: 'whatsapp_addon',
+      addonFeatures: features,
+      addonBundle: isBundle,
+      userId: user._id,
+      status: 'pending',
+    });
+
+    const baseUrl = req.headers.origin || 'https://crm.productivo.in';
+    const returnUrl = `${baseUrl}/premium?pid=${purchase._id}&addon=1`;
+    const linkId = buildLinkId('addon', purchase._id);
+
+    const link = await cashfree.createPaymentLink({
+      linkId,
+      amount,
+      purpose,
+      customerName: user.name,
+      customerEmail: user.email,
+      customerPhone: phone,
+      returnUrl,
+      notifyUrl: WEBHOOK_URL,
+    });
+
+    purchase.cashfreeLinkId = link.linkId;
+    purchase.cashfreeLinkStatus = link.status;
+    purchase.paymentUrl = link.linkUrl;
+    await purchase.save();
+
+    return res.status(200).json({
+      success: true,
+      paymentUrl: link.linkUrl,
+      purchaseId: purchase._id,
+      amount,
+      features,
+      isBundle,
+    });
+  } catch (err) {
+    const detail = err.response?.data || err.message;
+    console.error('initiateAddonPayment error:', JSON.stringify(detail, null, 2));
+    const gatewayMsg = err.response?.data?.message || err.message;
+    return res.status(400).json({
+      success: false,
+      error: gatewayMsg || 'Failed to create payment request.',
+    });
+  }
+};
+
+// POST /api/v1/payments/webhook — Cashfree webhook
+// Signature: HMAC-SHA256(secret, timestamp + rawBody) base64-encoded
 export const paymentWebhook = async (req, res) => {
   try {
-    const {
-      payment_id,
-      payment_request_id,
-      status,
-      buyer_name,
-      buyer_email,
-      buyer_phone,
-      amount,
-    } = req.body;
+    const signature = req.headers['x-webhook-signature'];
+    const timestamp = req.headers['x-webhook-timestamp'];
+    const rawBody = req.rawBody || JSON.stringify(req.body);
 
-    const purchase = await Purchase.findOne({ paymentRequestId: payment_request_id });
-    if (!purchase) return res.status(200).send('OK'); // unknown, ignore
+    const valid = cashfree.verifyWebhookSignature({ rawBody, timestamp, signature });
+    if (!valid) {
+      console.warn('[Cashfree webhook] signature verification failed');
+      return res.status(401).send('invalid signature');
+    }
 
-    purchase.paymentId       = payment_id || '';
-    purchase.instamojoStatus = status || '';
-    purchase.status          = status === 'Credit' ? 'paid' : 'failed';
+    const event = req.body || {};
+    const data = event?.data || {};
+    const type = event?.type || '';
+
+    // Two relevant payloads:
+    //  1) PAYMENT_LINK_EVENT   — data.link_id + data.link_status=PAID
+    //  2) PAYMENT_SUCCESS_WEBHOOK / PAYMENT_FAILED_WEBHOOK — nested order/payment
+    let linkId = data.link_id || data?.order?.order_tags?.link_id || '';
+    if (!linkId && data?.order?.order_id) {
+      // Some webhooks include the link_id in order_tags only when linked to a link
+      linkId = data.order.order_tags?.link_id || '';
+    }
+
+    if (!linkId) {
+      // Fallback: treat by order_id — not relevant for our flow (we only use links)
+      return res.status(200).send('OK');
+    }
+
+    const purchase = await Purchase.findOne({ cashfreeLinkId: linkId });
+    if (!purchase) return res.status(200).send('OK'); // unknown link
+
+    // Derive paid/failed from whichever shape we got
+    const linkStatus = data.link_status || '';
+    const paymentStatus = data?.payment?.payment_status || ''; // SUCCESS / FAILED / USER_DROPPED / etc.
+
+    const isPaid =
+      linkStatus === 'PAID' ||
+      paymentStatus === 'SUCCESS' ||
+      type === 'PAYMENT_SUCCESS_WEBHOOK';
+
+    const isFailed =
+      linkStatus === 'EXPIRED' ||
+      linkStatus === 'CANCELLED' ||
+      paymentStatus === 'FAILED' ||
+      type === 'PAYMENT_FAILED_WEBHOOK';
+
+    if (linkStatus) purchase.cashfreeLinkStatus = linkStatus;
+    if (data?.order?.order_id) purchase.cashfreeOrderId = data.order.order_id;
+    if (data?.payment?.cf_payment_id) purchase.cashfreePaymentId = String(data.payment.cf_payment_id);
+
+    if (isPaid) purchase.status = 'paid';
+    else if (isFailed) purchase.status = 'failed';
     await purchase.save();
 
     if (purchase.status === 'paid') {
-      // Activate subscription (non-blocking)
-      activateSubscription(purchase._id, purchase.userId).catch(() => {});
-
-      if (!purchase.invoiceEmailSent) {
-        await sendInvoiceEmail(purchase);
-        purchase.invoiceEmailSent = true;
-        await purchase.save();
+      if (purchase.type === 'whatsapp_addon') {
+        await activateAddonPurchase(purchase).catch((e) =>
+          console.error('activateAddonPurchase webhook error:', e.message)
+        );
+      } else {
+        activateSubscription(purchase._id, purchase.userId).catch(() => {});
+        if (!purchase.invoiceEmailSent) {
+          await sendInvoiceEmail(purchase);
+          purchase.invoiceEmailSent = true;
+          await purchase.save();
+        }
       }
     }
 
     return res.status(200).send('OK');
   } catch (err) {
     console.error('paymentWebhook error:', err.message);
-    return res.status(200).send('OK'); // always 200 to Instamojo
+    return res.status(200).send('OK'); // always 200 so Cashfree stops retrying on bugs in our code
   }
 };
 
-// GET /api/v1/payments/verify?pid=<purchaseId>&payment_id=<pid>&payment_request_id=<prid>
-// Called from frontend redirect after payment
+// GET /api/v1/payments/verify?pid=<purchaseId>
+// Called from frontend on return URL. Verifies status by hitting Cashfree directly.
 export const verifyPayment = async (req, res) => {
   try {
-    const { pid, payment_id, payment_request_id } = req.query;
-
-    let purchase = await Purchase.findById(pid);
+    const { pid } = req.query;
+    const purchase = await Purchase.findById(pid);
     if (!purchase) return res.status(404).json({ success: false, error: 'Purchase not found.' });
 
-    // If already marked paid (webhook was faster), return immediately
     if (purchase.status === 'paid') {
       return res.status(200).json({ success: true, status: 'paid', purchase });
     }
 
-    // Otherwise query Instamojo directly
-    if (payment_request_id && payment_id) {
-      const instaRes = await axios.get(
-        `${INSTAMOJO_API}/payment-requests/${payment_request_id}/${payment_id}/`,
-        { headers: instamojoHeaders }
-      );
-
-      const p = instaRes.data.payment_request?.payments?.[0];
-      if (p) {
-        purchase.paymentId       = payment_id;
-        purchase.instamojoStatus = p.status;
-        purchase.status          = p.status === 'Credit' ? 'paid' : 'failed';
+    if (purchase.cashfreeLinkId) {
+      try {
+        const link = await cashfree.getPaymentLink(purchase.cashfreeLinkId);
+        purchase.cashfreeLinkStatus = link.link_status || purchase.cashfreeLinkStatus;
+        if (link.link_status === 'PAID') {
+          purchase.status = 'paid';
+          const orders = await cashfree.getPaymentLinkOrders(purchase.cashfreeLinkId).catch(() => []);
+          if (orders?.[0]?.order_id) purchase.cashfreeOrderId = orders[0].order_id;
+        } else if (link.link_status === 'EXPIRED' || link.link_status === 'CANCELLED') {
+          purchase.status = 'failed';
+        }
         await purchase.save();
+      } catch (e) {
+        console.error('verifyPayment cashfree fetch failed:', e.response?.data || e.message);
       }
     }
 
     if (purchase.status === 'paid') {
-      activateSubscription(purchase._id, purchase.userId).catch(() => {});
-      if (!purchase.invoiceEmailSent) {
-        await sendInvoiceEmail(purchase);
-        purchase.invoiceEmailSent = true;
-        await purchase.save();
+      if (purchase.type === 'whatsapp_addon') {
+        await activateAddonPurchase(purchase).catch((e) =>
+          console.error('activateAddonPurchase verify error:', e.message)
+        );
+      } else {
+        activateSubscription(purchase._id, purchase.userId).catch(() => {});
+        if (!purchase.invoiceEmailSent) {
+          await sendInvoiceEmail(purchase);
+          purchase.invoiceEmailSent = true;
+          await purchase.save();
+        }
       }
     }
 
@@ -157,31 +282,31 @@ export const verifyPayment = async (req, res) => {
   }
 };
 
-// POST /api/v1/payments/confirm — called from frontend after Instamojo onSuccess
+// POST /api/v1/payments/confirm — retained for backwards compat with any client
+// that already POSTs a "paid" confirmation. Cashfree's reliable webhook + verify
+// endpoint make this effectively a no-op — we just ensure a Purchase row exists.
 export const confirmPayment = async (req, res) => {
   try {
-    const { name, email, phone, paymentId } = req.body;
+    const { name, email, phone, purchaseId } = req.body;
     if (!name || !email || !phone) {
       return res.status(400).json({ success: false, error: 'Missing required fields.' });
     }
 
-    const purchase = await Purchase.create({
-      name, email, phone,
-      paymentId: paymentId || '',
-      status: 'paid',
-      type: 'new_lead',
-      instamojoStatus: 'Credit',
-    });
+    let purchase = null;
+    if (purchaseId) purchase = await Purchase.findById(purchaseId);
 
-    // Activate subscription if userId provided (in-app upgrade)
-    if (req.user?.role === 'superadmin') {
-      activateSubscription(purchase._id, req.user._id).catch(() => {});
+    if (!purchase) {
+      purchase = await Purchase.create({
+        name,
+        email,
+        phone,
+        amount: PRO_AMOUNT,
+        status: 'pending',
+        type: 'new_lead',
+      });
     }
 
-    await sendInvoiceEmail(purchase);
-    await Purchase.findByIdAndUpdate(purchase._id, { invoiceEmailSent: true });
-
-    return res.status(201).json({ success: true, purchaseId: purchase._id });
+    return res.status(200).json({ success: true, purchaseId: purchase._id });
   } catch (err) {
     console.error('confirmPayment error:', err.message);
     return res.status(500).json({ success: false, error: 'Failed to confirm purchase.' });
@@ -199,10 +324,28 @@ export const getPurchases = async (req, res) => {
       Purchase.countDocuments(filter),
     ]);
     return res.status(200).json({ success: true, data: purchases, total });
-  } catch (err) {
+  } catch {
     return res.status(500).json({ success: false, error: 'Failed to fetch purchases.' });
   }
 };
+
+// Internal: activate WA addon features once Purchase.status === 'paid'
+async function activateAddonPurchase(purchase) {
+  if (purchase.addonActivated) return;
+  if (!purchase.userId) return;
+  const features = purchase.addonFeatures?.length ? purchase.addonFeatures : [];
+  if (!features.length) return;
+
+  let record = await WhatsappAddon.findOne({ superadminId: purchase.userId });
+  if (!record) {
+    record = await WhatsappAddon.create({ superadminId: purchase.userId, addons: [] });
+  }
+  record.activateFeatures(features, { purchaseId: purchase._id, durationDays: 365 });
+  await record.save();
+
+  purchase.addonActivated = true;
+  await purchase.save();
+}
 
 // ─── Internal: send invoice email via Brevo ─────────────────────────────────
 async function sendInvoiceEmail(purchase) {
@@ -251,34 +394,13 @@ async function sendInvoiceEmail(purchase) {
     <div class="badge">✓ Payment Successful</div>
 
     <div class="invoice-box">
-      <div class="invoice-row">
-        <span class="invoice-label">Invoice No.</span>
-        <span class="invoice-value">${invoiceNo}</span>
-      </div>
-      <div class="invoice-row">
-        <span class="invoice-label">Date</span>
-        <span class="invoice-value">${date}</span>
-      </div>
-      <div class="invoice-row">
-        <span class="invoice-label">Name</span>
-        <span class="invoice-value">${purchase.name}</span>
-      </div>
-      <div class="invoice-row">
-        <span class="invoice-label">Email</span>
-        <span class="invoice-value">${purchase.email}</span>
-      </div>
-      <div class="invoice-row">
-        <span class="invoice-label">Plan</span>
-        <span class="invoice-value">Productivo Pro — 1 Year</span>
-      </div>
-      <div class="invoice-row">
-        <span class="invoice-label">Billing Period</span>
-        <span class="invoice-value">Annual</span>
-      </div>
-      <div class="invoice-row total">
-        <span>Total Paid</span>
-        <span>₹1,499</span>
-      </div>
+      <div class="invoice-row"><span class="invoice-label">Invoice No.</span><span class="invoice-value">${invoiceNo}</span></div>
+      <div class="invoice-row"><span class="invoice-label">Date</span><span class="invoice-value">${date}</span></div>
+      <div class="invoice-row"><span class="invoice-label">Name</span><span class="invoice-value">${purchase.name}</span></div>
+      <div class="invoice-row"><span class="invoice-label">Email</span><span class="invoice-value">${purchase.email}</span></div>
+      <div class="invoice-row"><span class="invoice-label">Plan</span><span class="invoice-value">Productivo Pro — 1 Year</span></div>
+      <div class="invoice-row"><span class="invoice-label">Billing Period</span><span class="invoice-value">Annual</span></div>
+      <div class="invoice-row total"><span>Total Paid</span><span>₹${purchase.amount?.toLocaleString?.('en-IN') || PRO_AMOUNT}</span></div>
     </div>
 
     <p style="font-size:14px;color:#374151;margin-bottom:16px;"><strong>What's included in your Pro plan:</strong></p>
@@ -292,9 +414,7 @@ async function sendInvoiceEmail(purchase) {
       <li>Priority support</li>
     </ul>
 
-    <div class="cta">
-      <a href="https://crm.productivo.in">Open Your Dashboard →</a>
-    </div>
+    <div class="cta"><a href="https://crm.productivo.in">Open Your Dashboard →</a></div>
 
     <p style="font-size:13px;color:#6b7280;text-align:center;">Need help getting started? Reply to this email or WhatsApp us at <strong>+91-94772-32082</strong></p>
   </div>

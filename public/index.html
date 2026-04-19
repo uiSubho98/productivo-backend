@@ -14,8 +14,6 @@
   <!-- Three.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
 
-  <!-- Instamojo Seamless Checkout -->
-  <script src="https://js.instamojo.com/v1/checkout.js"></script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2457,7 +2455,7 @@
         Proceed to Pay ₹1499 →
       </button>
     </form>
-    <p style="text-align:center;font-size:0.72rem;color:#6b7280;margin-top:14px;">🔒 Secured by Instamojo · Your data is safe</p>
+    <p style="text-align:center;font-size:0.72rem;color:#6b7280;margin-top:14px;">🔒 Secured by Cashfree · Your data is safe</p>
   </div>
 </div>
 
@@ -2710,42 +2708,11 @@ function showToast(msg, type) {
   setTimeout(() => { t.style.display = 'none'; }, 4000);
 }
 
-// !! Replace this with your actual Instamojo payment link from dashboard
-const INSTAMOJO_PAYMENT_LINK = 'https://www.instamojo.com/@productivo';
-
-Instamojo.configure({
-  handlers: {
-    onSuccess: async function(response) {
-      closePayModal();
-      // Save purchase record with payment details
-      try {
-        await fetch('/api/v1/payments/confirm', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name:      sessionStorage.getItem('pay_name'),
-            email:     sessionStorage.getItem('pay_email'),
-            phone:     sessionStorage.getItem('pay_phone'),
-            paymentId: response.paymentId || response.payment_id || '',
-            status:    'paid',
-          }),
-        });
-      } catch (_) {}
-      showToast('🎉 Payment successful! Invoice sent to your email.', 'success');
-      sessionStorage.removeItem('pay_name');
-      sessionStorage.removeItem('pay_email');
-      sessionStorage.removeItem('pay_phone');
-    },
-    onFailure: function(response) {
-      showToast('Payment failed. Please try again.', 'error');
-    },
-    onClose: function() {
-      const btn = document.getElementById('pay-btn');
-      btn.disabled = false;
-      btn.textContent = 'Proceed to Pay ₹1499 →';
-    },
-  },
-});
+function showPayError(msg) {
+  const errEl = document.getElementById('pay-error');
+  errEl.textContent = msg;
+  errEl.style.display = 'block';
+}
 
 document.getElementById('pay-form').addEventListener('submit', async function(e) {
   e.preventDefault();
@@ -2757,22 +2724,47 @@ document.getElementById('pay-form').addEventListener('submit', async function(e)
   const phone = document.getElementById('pay-phone').value.trim();
   const email = document.getElementById('pay-email').value.trim();
 
-  if (!name || !phone || !email) {
-    errEl.textContent = 'All fields are required.';
-    errEl.style.display = 'block';
-    return;
-  }
+  if (!name) return showPayError('Name is required.');
+  if (name.length < 2) return showPayError('Name must be at least 2 characters.');
+
+  const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!email) return showPayError('Email is required.');
+  if (!emailRe.test(email)) return showPayError('Enter a valid email address.');
+
+  const digits = phone.replace(/\D/g, '');
+  if (!digits) return showPayError('Phone number is required.');
+  // Accept 10-digit Indian or +91 + 10 digits (12 digits starting with 91)
+  const ok = digits.length === 10 || (digits.length === 12 && digits.startsWith('91'));
+  if (!ok) return showPayError('Enter a valid 10-digit phone number (or +91 followed by 10 digits).');
 
   btn.disabled = true;
   btn.textContent = 'Opening payment…';
 
-  // Stash details for the onSuccess callback
-  sessionStorage.setItem('pay_name',  name);
-  sessionStorage.setItem('pay_email', email);
-  sessionStorage.setItem('pay_phone', phone);
+  try {
+    const res = await fetch('/api/v1/payments/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, phone }),
+    });
+    const data = await res.json();
 
-  closePayModal();
-  Instamojo.open(INSTAMOJO_PAYMENT_LINK);
+    if (!res.ok || !data?.paymentUrl) {
+      throw new Error(data?.error || 'Failed to start payment');
+    }
+
+    // Stash for the return page
+    sessionStorage.setItem('pay_name',  name);
+    sessionStorage.setItem('pay_email', email);
+    sessionStorage.setItem('pay_phone', phone);
+
+    // Redirect to Cashfree hosted checkout
+    window.location.href = data.paymentUrl;
+  } catch (err) {
+    errEl.textContent = err.message || 'Could not start payment. Please try again.';
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Proceed to Pay ₹1499 →';
+  }
 });
 
 

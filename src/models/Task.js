@@ -82,6 +82,22 @@ const taskSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Cached sum of all TaskTimeLog.durationMs for this task — updated on timer stop.
+    totalTimeMs: {
+      type: Number,
+      default: 0,
+    },
+    // userId of whoever currently has a running timer on this task (null if idle).
+    activeTimerBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    // When the current running timer was started — for live elapsed-time display on the frontend.
+    activeTimerStartedAt: {
+      type: Date,
+      default: null,
+    },
     attachments: [attachmentSchema],
     subtasks: [subtaskSchema],
     organizationId: {
