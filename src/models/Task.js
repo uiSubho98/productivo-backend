@@ -7,6 +7,11 @@ const subtaskSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    url: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     status: {
       type: String,
       enum: ['todo', 'in_progress', 'done'],
@@ -18,7 +23,7 @@ const subtaskSchema = new mongoose.Schema(
       default: null,
     },
   },
-  { _id: true }
+  { _id: true, timestamps: true }
 );
 
 const attachmentSchema = new mongoose.Schema(
@@ -54,7 +59,7 @@ const taskSchema = new mongoose.Schema(
     projectId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Project',
-      required: true,
+      default: null,
     },
     categories: [
       {
