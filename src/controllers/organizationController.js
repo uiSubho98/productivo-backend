@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import Organization from '../models/Organization.js';
 import User from '../models/User.js';
+import Subscription from '../models/Subscription.js';
 
 export const create = async (req, res) => {
   try {
@@ -22,9 +23,19 @@ export const create = async (req, res) => {
       resolvedParentOrgId = req.user.organizationId;
     }
 
-    // Block superadmin from creating a second master org on free plan
+    // Superadmin already has a master org + no parentOrgId supplied → treat as
+    // a sub-org request. Pro/enterprise get unlimited sub-orgs; free is blocked.
     if (req.user.role === 'superadmin' && !parentOrgId && req.user.organizationId) {
-      return res.status(403).json({ success: false, error: 'You already have a master organization. Upgrade to Pro to create sub-organizations.' });
+      const sub = await Subscription.findOne({ userId: req.user._id });
+      const isPaidActive = sub?.isActive() && (sub.plan === 'pro' || sub.plan === 'enterprise');
+      if (!isPaidActive) {
+        return res.status(403).json({ success: false, error: 'You already have a master organization. Upgrade to Pro to create sub-organizations.' });
+      }
+      const masterOrg = await Organization.findOne({ superadminId: req.user._id, parentOrgId: null });
+      if (!masterOrg) {
+        return res.status(400).json({ success: false, error: 'No master organization found to attach this sub-org to.' });
+      }
+      resolvedParentOrgId = masterOrg._id;
     }
 
     // If parentOrgId explicitly provided by a superadmin, validate ownership

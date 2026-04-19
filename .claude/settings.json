@@ -23,7 +23,8 @@
       "Bash(node --check src/controllers/attendanceController.js src/controllers/taskTimerController.js src/controllers/organizationController.js src/routes/organizations.js src/jobs/scheduler.js src/models/AttendanceEntry.js src/models/TaskTimeLog.js)",
       "Bash(node --check src/server.js src/routes/auth.js src/models/Client.js src/models/WhatsappAddon.js src/models/Subscription.js)",
       "Bash(node src/scripts/reset-employee-passwords.js)",
-      "Bash(node --check src/controllers/paymentController.js)"
+      "Bash(node --check src/controllers/paymentController.js)",
+      "Read(//Users/subhojitdutta/Desktop/d/**)"
     ],
     "additionalDirectories": [
       "/Users/subhojitdutta/Desktop/d/productivo-crm/src/services",
