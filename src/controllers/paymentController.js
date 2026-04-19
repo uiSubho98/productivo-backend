@@ -1,4 +1,8 @@
+import bcrypt from 'bcryptjs';
 import Purchase from '../models/Purchase.js';
+import User from '../models/User.js';
+import Organization from '../models/Organization.js';
+import Subscription from '../models/Subscription.js';
 import WhatsappAddon, { ADDON_FEATURES, ADDON_PRICES } from '../models/WhatsappAddon.js';
 import { sendEmail } from '../services/emailService.js';
 import * as cashfree from '../services/cashfreeService.js';
@@ -215,7 +219,11 @@ export const paymentWebhook = async (req, res) => {
           console.error('activateAddonPurchase webhook error:', e.message)
         );
       } else {
-        activateSubscription(purchase._id, purchase.userId).catch(() => {});
+        const userId = await provisionAccountForPurchase(purchase).catch((e) => {
+          console.error('provisionAccountForPurchase webhook error:', e.message);
+          return purchase.userId;
+        });
+        activateSubscription(purchase._id, userId).catch(() => {});
         if (!purchase.invoiceEmailSent) {
           await sendInvoiceEmail(purchase);
           purchase.invoiceEmailSent = true;
@@ -266,7 +274,11 @@ export const verifyPayment = async (req, res) => {
           console.error('activateAddonPurchase verify error:', e.message)
         );
       } else {
-        activateSubscription(purchase._id, purchase.userId).catch(() => {});
+        const userId = await provisionAccountForPurchase(purchase).catch((e) => {
+          console.error('provisionAccountForPurchase verify error:', e.message);
+          return purchase.userId;
+        });
+        activateSubscription(purchase._id, userId).catch(() => {});
         if (!purchase.invoiceEmailSent) {
           await sendInvoiceEmail(purchase);
           purchase.invoiceEmailSent = true;
@@ -328,6 +340,50 @@ export const getPurchases = async (req, res) => {
     return res.status(500).json({ success: false, error: 'Failed to fetch purchases.' });
   }
 };
+
+// Internal: ensure a superadmin User + master Org exist for a paid landing-page
+// (`new_lead`) purchase. Password is set to the email (per product decision).
+// Idempotent — safe to call on webhook + verify races.
+async function provisionAccountForPurchase(purchase) {
+  if (purchase.userId) return purchase.userId;
+
+  const email = purchase.email.toLowerCase().trim();
+  let user = await User.findOne({ email });
+
+  if (!user) {
+    const salt = await bcrypt.genSalt(12);
+    const passwordHash = await bcrypt.hash(email, salt);
+    user = await User.create({
+      name: purchase.name.trim(),
+      email,
+      passwordHash,
+      role: 'superadmin',
+    });
+  } else if (user.role !== 'superadmin' && user.role !== 'product_owner') {
+    user.role = 'superadmin';
+    await user.save();
+  }
+
+  let org = await Organization.findOne({ superadminId: user._id, parentOrgId: null });
+  if (!org) {
+    org = await Organization.create({
+      name: `${purchase.name.trim()}'s Workspace`,
+      adminIds: [user._id],
+      superadminId: user._id,
+      parentOrgId: null,
+    });
+  }
+
+  if (!user.organizationId) {
+    user.organizationId = org._id;
+    await user.save();
+  }
+
+  purchase.userId = user._id;
+  await purchase.save();
+
+  return user._id;
+}
 
 // Internal: activate WA addon features once Purchase.status === 'paid'
 async function activateAddonPurchase(purchase) {
@@ -401,6 +457,13 @@ async function sendInvoiceEmail(purchase) {
       <div class="invoice-row"><span class="invoice-label">Plan</span><span class="invoice-value">Productivo Pro — 1 Year</span></div>
       <div class="invoice-row"><span class="invoice-label">Billing Period</span><span class="invoice-value">Annual</span></div>
       <div class="invoice-row total"><span>Total Paid</span><span>₹${purchase.amount?.toLocaleString?.('en-IN') || PRO_AMOUNT}</span></div>
+    </div>
+
+    <div class="invoice-box" style="background:#eef2ff;border-color:#c7d2fe;">
+      <p style="margin:0 0 10px;font-size:14px;color:#3730a3;font-weight:700;">Your login credentials</p>
+      <div class="invoice-row"><span class="invoice-label">Email</span><span class="invoice-value">${purchase.email}</span></div>
+      <div class="invoice-row"><span class="invoice-label">Password</span><span class="invoice-value">${purchase.email}</span></div>
+      <p style="margin:12px 0 0;font-size:12px;color:#4338ca;">For security, please change your password after first login from Settings → Profile.</p>
     </div>
 
     <p style="font-size:14px;color:#374151;margin-bottom:16px;"><strong>What's included in your Pro plan:</strong></p>
