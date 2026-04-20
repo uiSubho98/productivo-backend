@@ -73,9 +73,10 @@ export const uploadFile = async (fileBuffer, originalName, mimeType, folder = 'u
   });
 
   const isImage = mimeType.startsWith('image/');
-  // Images are served via our own proxy to avoid Google Drive CORS/embedding issues
+  // Images are served via our own proxy to avoid Google Drive CORS/embedding issues.
+  // Use an absolute URL so the frontend (hosted on a different origin) resolves it correctly.
   const url = isImage
-    ? `/api/v1/image-proxy?id=${file.data.id}`
+    ? `${env.publicBaseUrl}/api/v1/image-proxy?id=${file.data.id}`
     : `https://drive.google.com/uc?id=${file.data.id}&export=download`;
 
   return {
